@@ -1,0 +1,180 @@
+[
+  {
+    "tenantId": "demo-sample",
+    "devOnly": true,
+    "apiKeyHash": "1bc7dd20f7de795c6d17fc99097cc6af92ccad821596178009e4125cf3603f24",
+    "language": "az",
+    "limits": {
+      "monthlyRequests": 1000,
+      "ratePerMinute": 30
+    },
+    "profile": {
+      "businessName": "Demo Sayt",
+      "domain": "avtomobil",
+      "tone": "dostcasına",
+      "maxResults": 5
+    },
+    "source": {
+      "type": "memory"
+    }
+  },
+  {
+    "tenantId": "own-site",
+    "devOnly": true,
+    "apiKeyHash": "6cfb8c7247608e0028ef51faa44507e1b1e21e1dabd1ad642300cf06aef2a42c",
+    "language": "az",
+    "limits": {
+      "monthlyRequests": 5000,
+      "ratePerMinute": 30
+    },
+    "profile": {
+      "domain": "avtomobil və motosiklet",
+      "tone": "dostcasına",
+      "maxResults": 5
+    },
+    "source": {
+      "type": "mongo"
+    }
+  },
+  {
+    "tenantId": "demo-musteri",
+    "devOnly": true,
+    "apiKeyHash": "a0f0b841280b1c88ff238d789483806848d976ee85d4fbcda9d473f4f6c9526a",
+    "language": "az",
+    "limits": {
+      "monthlyRequests": 500,
+      "ratePerMinute": 20
+    },
+    "profile": {
+      "businessName": "Müştəri Avto",
+      "domain": "avtomobil",
+      "tone": "rəsmi",
+      "maxResults": 5,
+      "extraInstructions": "Qiyməti həmişə AZN ilə yaz."
+    },
+    "source": {
+      "type": "rest",
+      "baseUrl": "http://localhost:4000",
+      "timeoutMs": 5000,
+      "cacheSeconds": 30,
+      "auth": {
+        "type": "header",
+        "name": "X-Api-Key",
+        "valueEnv": "DEMO_CUSTOMER_KEY"
+      },
+      "search": {
+        "method": "GET",
+        "path": "/api/ads",
+        "limitParam": "per_page"
+      },
+      "filters": {
+        "maxPrice": {
+          "type": "number",
+          "description": "Maksimum qiymət",
+          "param": "price_to"
+        },
+        "minPrice": {
+          "type": "number",
+          "description": "Minimum qiymət",
+          "param": "price_from"
+        },
+        "minYear": {
+          "type": "number",
+          "description": "Ən aşağı buraxılış ili",
+          "param": "year_from"
+        },
+        "maxYear": {
+          "type": "number",
+          "description": "Ən yüksək buraxılış ili",
+          "param": "year_to"
+        },
+        "maxMileage": {
+          "type": "number",
+          "description": "Maksimum yürüş (km)",
+          "param": "km_to"
+        },
+        "make": {
+          "type": "string",
+          "description": "Marka (dəqiq ad)",
+          "param": "brand_id",
+          "valueFrom": "vocabulary"
+        },
+        "bodyType": {
+          "type": "string",
+          "description": "Kateqoriya / kuzov tipi (dəqiq ad)",
+          "param": "body",
+          "valueFrom": "vocabulary"
+        },
+        "city": {
+          "type": "string",
+          "description": "Şəhər / region (dəqiq ad)",
+          "param": "city_id",
+          "valueFrom": "vocabulary"
+        },
+        "sort": {
+          "param": "order",
+          "valueMap": {
+            "price:asc": "price_asc",
+            "price:desc": "price_desc",
+            "year:desc": "year_desc",
+            "year:asc": "year_asc",
+            "mileage:asc": "km_asc"
+          }
+        }
+      },
+      "vocabulary": {
+        "path": "/api/meta",
+        "lists": {
+          "make": {
+            "itemsPath": "brands",
+            "idField": "id",
+            "nameField": "title"
+          },
+          "bodyType": {
+            "itemsPath": "categories",
+            "idField": "code",
+            "nameField": "title"
+          },
+          "city": {
+            "itemsPath": "cities",
+            "idField": "id",
+            "nameField": "title"
+          }
+        }
+      },
+      "response": {
+        "itemsPath": "data.items",
+        "itemFilter": {
+          "path": "state",
+          "in": [
+            "published"
+          ]
+        },
+        "defaults": {
+          "currency": "AZN"
+        },
+        "fields": {
+          "id": "ad_id",
+          "make": "brand.title",
+          "model": "model.title",
+          "title": "{brand.title} {model.title?}",
+          "price": "price.value",
+          "currency": "price.cur",
+          "year": "year",
+          "volume": "engine_cc",
+          "mileage": "km",
+          "bodyType": {
+            "path": "category.code",
+            "lookup": "bodyType"
+          },
+          "city": "city.title",
+          "image": "https://musteri.example{photos[0].url}",
+          "url": "https://musteri.example/elan/{slug}",
+          "attributes": {
+            "Rəng": "color.title"
+          }
+        }
+      }
+    }
+  }
+]

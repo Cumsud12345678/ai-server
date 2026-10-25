@@ -1,0 +1,102 @@
+{
+  "profile": {
+    "language": "az",
+    "tone": "dostcasına",
+    "maxResults": 5,
+    "extraInstructions": "Qiymətləri AZN ilə göstər."
+  },
+  "source": {
+    "type": "rest",
+    "baseUrl": "https://api.example.com",
+    "timeoutMs": 5000,
+    "cacheSeconds": 30,
+    "auth": {
+      "type": "header",
+      "name": "X-Api-Key"
+    },
+    "search": {
+      "method": "GET",
+      "path": "/api/listings",
+      "limitParam": "per_page"
+    },
+    "filters": {
+      "maxPrice": {
+        "type": "number",
+        "description": "Maksimum qiymət",
+        "param": "price_to"
+      },
+      "minPrice": {
+        "type": "number",
+        "description": "Minimum qiymət",
+        "param": "price_from"
+      },
+      "make": {
+        "type": "string",
+        "description": "Marka",
+        "param": "brand",
+        "valueFrom": "vocabulary"
+      },
+      "color": {
+        "type": "string",
+        "description": "Rəng",
+        "param": "color_id",
+        "valueFrom": "vocabulary"
+      },
+      "year": {
+        "type": "range",
+        "description": "Buraxılış ili",
+        "minParam": "year_from",
+        "maxParam": "year_to"
+      },
+      "search": {
+        "type": "text",
+        "description": "Açar sözlərlə axtarış (təsvir, xüsusiyyət)",
+        "param": "q"
+      },
+      "warranty": {
+        "type": "boolean",
+        "description": "Zəmanəti var",
+        "param": "warranty",
+        "valueMap": {
+          "true": "1",
+          "false": "0"
+        }
+      }
+    },
+    "vocabulary": {
+      "path": "/api/meta",
+      "lists": {
+        "make": {
+          "itemsPath": "brands",
+          "idField": "id",
+          "nameField": "name"
+        },
+        "color": {
+          "itemsPath": "colors",
+          "idField": "id",
+          "nameField": "name"
+        }
+      }
+    },
+    "response": {
+      "itemsPath": "data.items",
+      "defaults": {
+        "currency": "AZN"
+      },
+      "fields": {
+        "id": "id",
+        "make": "brand.name",
+        "model": "model.name",
+        "title": "{brand.name} {model.name?}",
+        "price": "price",
+        "image": "images[0].url",
+        "url": "url",
+        "attributes": {
+          "Rəng": "color",
+          "Buraxılış ili": "year",
+          "Yürüş": "mileage"
+        }
+      }
+    }
+  }
+}

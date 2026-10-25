@@ -1,0 +1,21 @@
+{
+  "name": "car-advisor",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "mock": "node mock/server.js",
+    "test": "node --test",
+    "try:connector": "node scripts/try-connector.mjs"
+  },
+  "dependencies": {
+    "@google/genai": "^2.28.0",
+    "cheerio": "^1.2.0",
+    "dotenv": "^18.0.7",
+    "express": "^5.3.0",
+    "mammoth": "^1.13.0",
+    "mongoose": "^9.11.1",
+    "unpdf": "^1.9.1"
+  }
+}
