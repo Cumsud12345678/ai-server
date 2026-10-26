@@ -4,7 +4,7 @@ import { getTenantByKey, getTenant, refreshTenants } from "./tenants/tenantStore
 import { listCustomerTenants, addCustomerTenant, updateCustomerTenant, removeCustomerTenant } from "./tenants/customerStore.js";
 import { getRepo, dropRepo } from "./data/repoFactory.js";
 import { advise } from "./ai/advisor.js";
-import { recordQuery, listQueries, queryStats, clearQueries } from "./queries/queries.js";
+import { recordQuery, listQueries, queryStats, clearQueries, listConversations, getConversation } from "./queries/queries.js";
 import { checkAndCount, addTokens, getUsage, getUsageSummary, deleteTenantUsage } from "./usage/usage.js";
 import { canSpend, charge, deleteTenantBilling } from "./billing/billing.js";
 import { registerBillingRoutes } from "./billing/routes.js";
@@ -294,7 +294,7 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb } = {}) {
   };
 
   async function chat(req, res) {
-    const { message, history } = req.body ?? {};
+    const { message, history, sid } = req.body ?? {};
     if (typeof message !== "string" || !message.trim() || message.length > 500)
       return res.status(400).json({ error: "message düzgün deyil (1-500 simvol)" });
     if (!(await gateOr429(req, res))) return;
@@ -311,13 +311,13 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb } = {}) {
       // results: >0 elan, 0 axtarış aparıldı amma tapılmadı, -1 axtarışsız cavab (ümumi sual və s.), -2 operatora yönləndirildi
       const searched = r.searched ?? true;
       const results = support ? (r.unanswered ? 0 : 1) : !searched ? (r.unanswered ? -2 : -1) : (r.listings?.length ?? 0);
-      if (!req.skipQueryLog) await recordQuery(req.tenant, { message: message.trim(), results, tokens: r.tokens, cached: r.cached, costAzn: bill?.billedAzn });
+      if (!req.skipQueryLog) await recordQuery(req.tenant, { message: message.trim(), results, tokens: r.tokens, cached: r.cached, costAzn: bill?.billedAzn, sid, answer: r.answer });
       res.json({ answer: r.answer, listings: r.listings ?? [], ...(r.sources && { sources: r.sources }), ...(r.unanswered && { unanswered: true }), usage: { tokens: r.tokens },
         // Balans vəziyyəti yalnız portala verilir (müştərinin açıq API-sində görünmür)
         ...(req.viaPortal && bill && { billing: { state: bill.state, balanceAzn: bill.balanceAzn, billedAzn: bill.billedAzn, ...(bill.notify && { notify: bill.notify }) } }) });
     } catch (err) {
       console.error(`[chat] ${req.tenant.tenantId}:`, err.status ?? "", err.message);
-      if (!req.skipQueryLog) await recordQuery(req.tenant, { message: message.trim(), error: true });
+      if (!req.skipQueryLog) await recordQuery(req.tenant, { message: message.trim(), error: true, sid });
       if ([429, 500, 503].includes(err.status)) return res.status(503).json({ error: "Xidmət müvəqqəti yüklüdür, bir azdan yenə cəhd edin" });
       res.status(500).json({ error: "Xəta baş verdi" });
     }
@@ -350,6 +350,15 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb } = {}) {
     const n = (v, d) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : d);
     res.json({ enabled: req.tenant.profile?.logQueries !== false, retentionDays: Number(process.env.QUERY_RETENTION_DAYS) || 90,
       ...(await listQueries(req.tenant.tenantId, { before: String(req.query.before ?? "").slice(0, 80), limit: n(req.query.limit, 30), noResults: req.query.noResults === "1", q: String(req.query.q ?? "").slice(0, 100), days: Math.min(n(req.query.days, 30), 90) })) });
+  });
+  app.get("/v1/service/tenants/:tenantId/conversations", serviceAuth, customerTenant, async (req, res) => {
+    const n = (v, d) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : d);
+    res.json({ enabled: req.tenant.profile?.logQueries !== false, ...(await listConversations(req.tenant.tenantId, { before: String(req.query.before ?? "").slice(0, 40), limit: n(req.query.limit, 30), days: Math.min(n(req.query.days, 30), 90) })) });
+  });
+  app.get("/v1/service/tenants/:tenantId/conversations/:sid", serviceAuth, customerTenant, async (req, res) => {
+    const c = await getConversation(req.tenant.tenantId, req.params.sid);
+    if (!c) return res.status(404).json({ error: "Söhbət tapılmadı" });
+    res.json(c);
   });
   app.get("/v1/service/tenants/:tenantId/queries/stats", serviceAuth, customerTenant, async (req, res) => {
     const d = Number(req.query.days);
