@@ -16,7 +16,8 @@ const jobs = new Set();
 /** Testlər üçün: bütün fon işlərinin bitməsini gözləyir. */
 export const idle = async () => { while (jobs.size) await Promise.allSettled([...jobs]); };
 function background(fn) {
-  const p = fn().finally(() => jobs.delete(p));
+  // Fon işindəki gözlənilməz xəta bütün servisi çökdürməsin (Node işlənməmiş promise rədddində prosesi dayandırır)
+  const p = fn().catch((e) => console.error("[kb] fon işi uğursuz oldu:", e)).finally(() => jobs.delete(p));
   jobs.add(p);
   return p;
 }
@@ -51,7 +52,7 @@ async function run(tenant, source, work) {
     if (!(e instanceof KbError) && !e?.code) console.error(`[kb] ${tenant.tenantId} ${source._id}:`, e);
     Object.assign(source, { status: "failed", error: failMsg(e) });
   }
-  await putSource(source);
+  try { await putSource(source); } catch (e) { console.error(`[kb] ${tenant.tenantId} ${source._id} statusu yazıla bilmədi:`, e); }
 }
 
 export async function ingestFile(tenant, { name, mime, buffer }) {

@@ -28,3 +28,22 @@ test("mapItem: lookup, default və attributes", () => {
   assert.deepEqual(m.attributes, { Rəng: "Qara" });
 });
 test("slugify: Azərbaycan hərfləri", () => assert.equal(slugify("Şəki Ə-Ö"), "seki-e-o"));
+
+import { stripHtml, validateFieldSpecs } from "../src/connectors/mapper.js";
+test("divide/multiply: sentlə gələn qiymət manata çevrilir", () => {
+  const m = mapItem({ id: 1, t: "x", p: 1999900, q: "1 500" }, { id: "id", title: "t", price: { path: "p", divide: 100 }, mileage: { path: "q", multiply: 2 } });
+  assert.equal(m.price, 19999);
+  assert.equal(m.mileage, 3000);
+  assert.equal(mapItem({ id: 1, t: "x", p: 1999 }, { id: "id", title: "t", price: { path: "p", divide: 100 } }).price, 19.99);
+});
+test("stripHtml: etiketlər, entity-lər, script/style təmizlənir", () => {
+  assert.equal(stripHtml("<p>Əla&nbsp;vəziyyət</p><script>x()</script><br>Qiymət &amp; &#8364;5 &#x41;"), "Əla vəziyyət Qiymət & €5 A");
+  assert.equal(mapItem({ id: 1, d: "<b>Qara</b> rəng" }, { id: "id", title: { path: "d", stripHtml: true } }).title, "Qara rəng");
+  assert.equal(renderTemplate("{d|striphtml}", { d: "<i>a</i>" }), "a");
+});
+test("validateFieldSpecs: səhv divide/stripHtml rədd edilir", () => {
+  assert.equal(validateFieldSpecs({ price: { path: "p", divide: 100 }, attributes: { A: { path: "a", stripHtml: true } } }), null);
+  assert.match(validateFieldSpecs({ price: { path: "p", divide: 0 } }), /divide/);
+  assert.match(validateFieldSpecs({ price: { path: "p", multiply: "2" } }), /multiply/);
+  assert.match(validateFieldSpecs({ attributes: { A: { path: "a", stripHtml: "yes" } } }), /stripHtml/);
+});

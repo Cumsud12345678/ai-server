@@ -10,6 +10,7 @@ import { canSpend, charge, deleteTenantBilling } from "./billing/billing.js";
 import { registerBillingRoutes } from "./billing/routes.js";
 import { sanitizeFilters, compileSchema } from "./data/filters.js";
 import { createRestRepo, LOCAL_SORTABLE_FIELDS } from "./connectors/restRepo.js";
+import { validateFieldSpecs } from "./connectors/mapper.js";
 import { encryptSecret } from "./tenants/secretCrypto.js";
 import { answerFromKb } from "./kb/answer.js";
 import { registerKbRoutes } from "./kb/routes.js";
@@ -41,6 +42,13 @@ function validateConfig(body = {}, { secretAlreadyStored = false } = {}) {
     return "source.search.path və GET/POST method düzgün göstərilməlidir";
   if (!source.response || typeof source.response.itemsPath !== "string" || !source.response.itemsPath || !source.response.fields || typeof source.response.fields !== "object")
     return "source.response.itemsPath və source.response.fields tələb olunur";
+  if (source.search.graphql !== undefined) {
+    if (typeof source.search.graphql !== "string" || !source.search.graphql.trim() || source.search.graphql.length > 5000) return "source.search.graphql sorğu mətni olmalıdır (maksimum 5000 simvol)";
+    if (source.search.method && String(source.search.method).toUpperCase() !== "POST") return "GraphQL üçün search.method POST olmalıdır";
+  }
+  if (source.localText !== undefined && typeof source.localText !== "boolean") return "source.localText true və ya false olmalıdır";
+  const fieldErr = validateFieldSpecs(source.response.fields);
+  if (fieldErr) return fieldErr;
   if (source.auth && !["none", ...SECRET_AUTH].includes(source.auth.type || "none")) return "auth.type dəstəklənmir";
   if (source.auth && SECRET_AUTH.includes(source.auth.type) && !apiSecret && !secretAlreadyStored)
     return "API autentifikasiyası üçün apiSecret tələb olunur";

@@ -4,7 +4,21 @@ export const slugify = (v) =>
   String(v ?? "").replace(/[əƏıİIöÖüÜşŞçÇğĞ]/g, (c) => AZ[c]).toLowerCase()
     .normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 
-const transforms = { slug: slugify, lower: (s) => s.toLowerCase(), encode: encodeURIComponent };
+// HTML etiketlərini təmizləyir, əsas entity-ləri açır, boşluqları yığır
+const ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", laquo: "«", raquo: "»", ndash: "–", mdash: "—" };
+export function stripHtml(v) {
+  return String(v ?? "")
+    .replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<br\s*\/?>|<\/(p|div|li|h[1-6])>/gi, " ")
+    .replace(/<[^>]*>/g, "")
+    .replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e) => {
+      if (e[0] === "#") { const c = e[1].toLowerCase() === "x" ? parseInt(e.slice(2), 16) : Number(e.slice(1)); return Number.isFinite(c) && c > 0 && c < 0x110000 ? String.fromCodePoint(c) : " "; }
+      return ENTITIES[e.toLowerCase()] ?? m;
+    })
+    .replace(/\s+/g, " ").trim();
+}
+
+const transforms = { slug: slugify, lower: (s) => s.toLowerCase(), encode: encodeURIComponent, striphtml: stripHtml };
 
 // "a.b[0].c" yolu ilə dəyəri oxuyur
 export function getPath(obj, path) {
@@ -54,7 +68,14 @@ function resolveField(item, key, raw, lookup, forcedType) {
   const spec = typeof raw === "string" ? (raw.includes("{") ? { template: raw } : { path: raw }) : raw;
   let v = spec.template ? renderTemplate(spec.template, item) : getPath(item, spec.path);
   if (spec.lookup && lookup) v = lookup(spec.lookup, v); // ID → ad (vocabulary-dən)
+  if (spec.stripHtml && typeof v === "string") v = stripHtml(v);
   v = coerce(v, spec.type ?? forcedType ?? STANDARD_TYPES[key] ?? "string");
+  // qiymət sentlə gəlirsə: divide 100; (2 onluq işarəyə yuvarlanır ki, 15.000000001 çıxmasın)
+  if (typeof v === "number") {
+    if (spec.divide) v /= spec.divide;
+    if (spec.multiply) v *= spec.multiply;
+    if (spec.divide || spec.multiply) v = Math.round(v * 100) / 100;
+  }
   return v === null && spec.default !== undefined ? spec.default : v;
 }
 
@@ -74,3 +95,20 @@ export function mapItem(item, fields, { defaults = {}, lookup } = {}) {
 }
 
 export const validateListing = (l) => (!l.id ? "id yoxdur" : !l.title ? "title yoxdur" : null);
+
+// Sahə təsvirlərində yeni açarların yoxlanması (konfiqurasiya qəbul edilərkən). Xəta mətni və ya null.
+export function validateFieldSpecs(fields = {}) {
+  const check = (where, raw) => {
+    if (!raw || typeof raw !== "object") return null;
+    for (const k of ["divide", "multiply"])
+      if (raw[k] !== undefined && !(typeof raw[k] === "number" && Number.isFinite(raw[k]) && raw[k] > 0 && raw[k] <= 1e6)) return `${where}.${k} 0-dan böyük rəqəm olmalıdır`;
+    if (raw.stripHtml !== undefined && typeof raw.stripHtml !== "boolean") return `${where}.stripHtml true və ya false olmalıdır`;
+    return null;
+  };
+  for (const [k, raw] of Object.entries(fields)) {
+    if (k === "attributes" && raw && typeof raw === "object") {
+      for (const [label, spec] of Object.entries(raw)) { const e = check(`fields.attributes.${label}`, spec); if (e) return e; }
+    } else { const e = check(`fields.${k}`, raw); if (e) return e; }
+  }
+  return null;
+}

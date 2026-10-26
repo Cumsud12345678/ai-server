@@ -56,7 +56,11 @@ export async function listChunks(tenantId) {
   chunkCache.set(tenantId, { at: Date.now(), chunks });
   return chunks;
 }
-export async function countChunks(tenantId) { return (await byTenant("chunks", tenantId)).length; }
+// Mongo-da vektorları yükləmədən yalnız sayır (siyahı səhifəsi hər açılışda çağırır)
+export async function countChunks(tenantId) {
+  if (mongoEnabled()) return (await col(COLS.chunks)).countDocuments({ tenantId });
+  return (await byTenant("chunks", tenantId)).length;
+}
 export async function replaceSourceChunks(tenantId, sourceId, chunks) {
   chunkCache.delete(tenantId);
   const docs = chunks.map((c, i) => ({ _id: randomUUID(), tenantId, sourceId, idx: i, ...c }));

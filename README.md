@@ -36,6 +36,10 @@ Postman (Authorization: Bearer ...) , hazır inkişaf açarları (yalnız lokal!
 - `{ "path": "category.code", "lookup": "bodyType" }` : ID/kodu vocabulary ilə ada çevirir.
 - Rəqəm sahələri mətn gəlsə də ("12 500") avtomatik çevrilir.
 - `itemFilter`: müştərinin qaytardığı lazımsız elanları (qaralama) atır.
+- `"divide": 100` / `"multiply": 2`: rəqəm sahəsini çevirir (qiymət sentlə gəlirsə `{ "path": "cents", "divide": 100 }`). 2 onluq işarəyə yuvarlanır.
+- `"stripHtml": true`: sahədəki HTML etiketlərini və entity-ləri təmizləyir (şablonda `{desc|striphtml}`).
+- `source.localText: true`: API mətn axtarışını bilmirsə, `text` filtrinin sözləri nəticələrdə (başlıq, marka, model, şəhər, xüsusiyyətlər) lokal yoxlanır. Qeyd: yalnız API-nin qaytardığı səhifə daxilində süzür.
+- GraphQL: `source.search.graphql` ("query($q:String){...}") yazılsa sorğu POST gedir, filtrlər `variables`-a düşür; `itemsPath` məs. `data.ads.nodes`. GraphQL `errors` qayıtsa aydın xəta verilir.
 
 ## Filtrlər (müştəri özü elan edir)
 **Hər filtr eyni formada yazılır**: `{ "type", "description", "param" }` (aralıq üçün `minParam`/`maxParam`). "Hazır" filtr yoxdur:

@@ -66,7 +66,7 @@ test("aylıq limit → 429; dil və maxResults tenant-dan", async () => {
   assert.equal(r.status, 429);
   assert.equal((await r.json()).code, "MONTHLY_LIMIT");
   const sys = calls.at(-1).config.systemInstruction;
-  assert.match(sys, /English only/);
+  assert.match(sys, /default language is English/);
   assert.match(sys, /Ən çox 3 elan/);
 });
 test("/v1/listings: nümunə tenant, limit tenant-ın maxResults-ı ilə məhdudlaşır", async () => {

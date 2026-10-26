@@ -26,10 +26,11 @@ const answerCache = new Map();
 const cacheKey = (tenant, message) =>
   `${tenant.tenantId}|${createHash("sha1").update(JSON.stringify([tenant.profile, tenant.source])).digest("hex").slice(0, 12)}|${message.toLowerCase().replace(/\s+/g, " ").replace(/[?!.,;]+$/g, "").trim()}`;
 
+// Müştərinin seçdiyi dil DEFOLT dildir. İstifadəçi başqa dildə (rus, ingilis, türk və s.) yazırsa, həmin dildə cavab verilir.
 const LANG = {
-  az: "Cavabı yalnız Azərbaycan dilində, Latın əlifbası ilə yaz, başqa əlifba və dildən söz qarışdırma. Düzgün yazılış: büdcə (büdçə yox), düşünə.",
-  en: "Answer in English only.",
-  ru: "Отвечай только на русском языке.",
+  az: "Defolt dil Azərbaycan dilidir (Latın əlifbası). İstifadəçi başqa dildə (rus, ingilis, türk və s.) yazırsa, onun yazdığı dildə cavab ver; dil bəlli deyilsə Azərbaycan dilində yaz. Azərbaycanca yazanda başqa əlifba və dildən söz qarışdırma. Düzgün yazılış: büdcə (büdçə yox), düşünə.",
+  en: "The default language is English. If the user writes in another language (Russian, Azerbaijani, Turkish, etc.), answer in the language they used; if the language is unclear, use English.",
+  ru: "Язык по умолчанию — русский. Если пользователь пишет на другом языке (азербайджанском, английском, турецком и т. д.), отвечай на языке пользователя; если язык неясен, отвечай по-русски.",
 };
 
 function baseSystem(tenant) {

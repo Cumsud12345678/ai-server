@@ -9,10 +9,12 @@ const tokens = (s) => fold(s).split(/[^a-z0-9а-я]+/).filter((t) => t.length >=
 
 const MIN_COS = () => Number(process.env.KB_MIN_COSINE) || 0.55;
 const MIN_COS_WITH_KW = () => Number(process.env.KB_MIN_COSINE_KW) || 0.45;
+// "Zəif uyğunluq": hədd keçilməsə də ən yaxın hissələr modelə verilir, o özü qərar verir (dialekt, səhv yazılış, danışıq dili sorğularında hədd tez-tez səhv rədd edirdi)
+const WEAK_COS = () => Number(process.env.KB_WEAK_COSINE) || 0.38;
 
 const dot = (a, b) => { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; };
 
-/** Qaytarır: { hits: [{ chunk, score, cos, kw }], relevant: bool }. hits azalan sırada, ən çox k ədəd. */
+/** Qaytarır: { hits: [{ chunk, score, cos, kw }], relevant: bool, weak: bool }. hits azalan sırada, ən çox k ədəd. */
 export async function searchKb(tenantId, query, { k = 5, client } = {}) {
   const chunks = await listChunks(tenantId);
   if (!chunks.length) return { hits: [], relevant: false, empty: true };
@@ -28,5 +30,6 @@ export async function searchKb(tenantId, query, { k = 5, client } = {}) {
   const hits = scored.slice(0, k);
   const top = hits[0];
   const relevant = qv ? top.cos >= MIN_COS() || (top.kw >= 0.6 && top.cos >= MIN_COS_WITH_KW()) : top.kw >= 0.6;
-  return { hits, relevant };
+  const weak = !relevant && (qv ? top.cos >= WEAK_COS() : top.kw >= 0.3);
+  return { hits, relevant, weak };
 }

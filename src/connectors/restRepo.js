@@ -1,6 +1,6 @@
 // Konfiqurasiya əsaslı REST konnektoru: hər müştəri üçün kod yox, JSON konfiqurasiya.
 import { safeFetchJson, ConnectorError } from "./safeFetch.js";
-import { getPath, mapItem, validateListing } from "./mapper.js";
+import { getPath, mapItem, validateListing, slugify } from "./mapper.js";
 import { toPublic, compileSchema } from "../data/filters.js";
 import { decryptSecret } from "../tenants/secretCrypto.js";
 
@@ -33,11 +33,14 @@ export function createRestRepo(tenant) {
     else if (a.type === "query") url.searchParams.set(a.name, secret);
   }
 
-  async function request(path, { method = "GET", params = null, ttlMs = 0 } = {}) {
+  async function request(path, { method = "GET", params = null, ttlMs = 0, graphql = null } = {}) {
     const url = new URL(path, cfg.baseUrl);
     const headers = {};
     let body;
-    if (params) {
+    if (graphql) {
+      // GraphQL: həmişə POST, filtrlər "variables" daxilində gedir
+      body = JSON.stringify({ query: graphql, variables: params ?? {} }); headers["content-type"] = "application/json";
+    } else if (params) {
       if (method === "GET") for (const [k, v] of Object.entries(params)) url.searchParams.set(k, String(v));
       else { body = JSON.stringify(params); headers["content-type"] = "application/json"; }
     }
@@ -119,8 +122,10 @@ export function createRestRepo(tenant) {
     if (params === null) { debug.note = "Filtrdəki ad müştərinin siyahısında tapılmadı"; return { listings: [], debug }; }
 
     const { json, shown, cached } = await request(cfg.search.path, {
-      method: cfg.search.method ?? "GET", params, ttlMs: (cfg.cacheSeconds ?? 60) * 1000,
+      method: cfg.search.graphql ? "POST" : cfg.search.method ?? "GET", params, graphql: cfg.search.graphql ?? null, ttlMs: (cfg.cacheSeconds ?? 60) * 1000,
     });
+    if (cfg.search.graphql && Array.isArray(json?.errors) && json.errors.length)
+      throw new ConnectorError(`GraphQL xətası: ${String(json.errors[0]?.message ?? "naməlum").slice(0, 150)}`, "GRAPHQL_ERROR");
     debug.request = shown; debug.cached = cached;
 
     const resp = cfg.response;
@@ -152,6 +157,19 @@ export function createRestRepo(tenant) {
       listings = listings.filter((l) => typeof l.price !== "number"
         || ((f.minPrice === undefined || l.price >= f.minPrice) && (f.maxPrice === undefined || l.price <= f.maxPrice)));
       if (listings.length < before) debug.note = `${before - listings.length} elan müştəri API-si qiymət filtrini nəzərə almadığı üçün atıldı`;
+    }
+
+    // Müştəri API-si mətn axtarışını bilmirsə (source.localText: true): açar sözləri özümüz yoxlayırıq.
+    // Hər söz başlıqda, markada, modeldə, şəhərdə və ya xüsusiyyətlərdə olmalıdır (hərf/diakritik fərqi nəzərə alınmır).
+    const textArg = schema.args.find((a) => a.kind === "text");
+    if (cfg.localText && textArg && f[textArg.name]) {
+      const words = slugify(f[textArg.name]).split("-").filter(Boolean);
+      const before = listings.length;
+      listings = listings.filter((l) => {
+        const hay = slugify([l.title, l.make, l.model, l.city, l.bodyType, l.fuelType, ...Object.values(l.attributes ?? {})].filter(Boolean).join(" "));
+        return words.every((w) => hay.includes(w));
+      });
+      if (listings.length < before) debug.note = [debug.note, `${before - listings.length} elan açar sözə uyğun gəlmədiyi üçün atıldı`].filter(Boolean).join("; ");
     }
 
     if (localFields.includes(f.sortBy)) {
