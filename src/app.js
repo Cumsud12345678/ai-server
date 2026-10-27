@@ -81,6 +81,7 @@ function validateProfile(p) {
   if (p.maxResults !== undefined && !Number.isFinite(Number(p.maxResults))) return "profile.maxResults rəqəm olmalıdır";
   if (p.logQueries !== undefined && typeof p.logQueries !== "boolean") return "profile.logQueries true və ya false olmalıdır";
   if (p.generalKnowledge !== undefined && typeof p.generalKnowledge !== "boolean") return "profile.generalKnowledge true və ya false olmalıdır";
+  if (p.kbAutoRefresh !== undefined && !["off", "daily", "weekly"].includes(p.kbAutoRefresh)) return "profile.kbAutoRefresh off, daily və ya weekly olmalıdır";
   return null;
 }
 
@@ -94,6 +95,7 @@ function mergeProfile(prev = {}, input = {}, extra = {}) {
   if (input.maxResults !== undefined) next.maxResults = Math.min(Math.max(Math.round(Number(input.maxResults)), 1), 10);
   if (input.logQueries !== undefined) next.logQueries = input.logQueries;
   if (input.generalKnowledge !== undefined) next.generalKnowledge = input.generalKnowledge;
+  if (input.kbAutoRefresh !== undefined) next.kbAutoRefresh = input.kbAutoRefresh;
   next.language ??= "az";
   next.mode ??= "listings";
   next.maxResults ??= 5;
@@ -298,7 +300,17 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb } = {}) {
     const { message, history, sid, identity: identityToken } = req.body ?? {};
     if (typeof message !== "string" || !message.trim() || message.length > 500)
       return res.status(400).json({ error: "message düzgün deyil (1-500 simvol)" });
-    if (!(await gateOr429(req, res))) return;
+    // Yavaş sorğuda vaxtın harada getdiyini göstərmək üçün mərhələ ölçüləri (yalnız 5 san-dən uzun çəkəndə yazılır)
+    const t0 = Date.now(); const marks = {}; let last = t0;
+    const ORDER = ["gate", "model", "tokens", "charge", "log"];
+    let stage = "gate";
+    const mark = (k) => { const n = Date.now(); marks[k] = n - last; last = n; stage = ORDER[ORDER.indexOf(k) + 1] ?? "bitdi"; };
+    // Sorğu bitməyib ilişibsə: 8 saniyədən sonra hansı mərhələdə olduğunu yazır (bitəndə və ya bağlantı kəsiləndə dayanır)
+    const stuck = setTimeout(() => console.warn(`[chat-stuck] ${req.tenant?.tenantId} mərhələ=${stage} ${Date.now() - t0}ms sonra hələ davam edir`, JSON.stringify(marks)), 8000);
+    res.once("close", () => clearTimeout(stuck));
+    const slowLog = (what) => { if (Date.now() - t0 > 5000) console.warn(`[chat-slow] ${req.tenant?.tenantId} ${what} toplam=${Date.now() - t0}ms`, JSON.stringify(marks)); };
+    if (!(await gateOr429(req, res))) return slowLog("gate-rədd");
+    mark("gate");
     try {
       const hist = Array.isArray(history) ? history : [];
       // Ziyarətçinin kimliyi yalnız saytın imzaladığı tokendən gəlir; səhv/bitmiş token = anonim (söhbət işləməyə davam edir)
@@ -307,19 +319,24 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb } = {}) {
       const r = support
         ? await kbFn({ tenant: req.tenant, message: message.trim(), history: hist, identity })
         : await adviseFn({ tenant: req.tenant, repo: await getRepo(req.tenant), message: message.trim(), history: hist, identity });
+      mark("model");
       await addTokens(req.tenant, r.tokens);
+      mark("tokens");
       let bill;
       try { bill = await charge(req.tenant, { costUsd: r.costUsd ?? 0, tokens: r.tokens ?? 0 }); }
       catch (e) { console.error(`[billing] ${req.tenant.tenantId}: xərc yazıla bilmədi:`, e.message); } // cavab itməsin
+      mark("charge");
       // results: >0 elan, 0 axtarış aparıldı amma tapılmadı, -1 axtarışsız cavab (ümumi sual və s.), -2 operatora yönləndirildi
       const searched = r.searched ?? true;
       const results = support ? (r.unanswered ? 0 : 1) : !searched ? (r.unanswered ? -2 : -1) : (r.listings?.length ?? 0);
       if (!req.skipQueryLog) await recordQuery(req.tenant, { message: message.trim(), results, tokens: r.tokens, cached: r.cached, costAzn: bill?.billedAzn, sid, answer: r.answer, private: r.private });
+      mark("log"); slowLog("ok");
       res.json({ answer: r.answer, listings: r.listings ?? [], ...(r.sources && { sources: r.sources }), ...(r.unanswered && { unanswered: true }), ...(identityToken && !identity && { identity: "invalid" }), usage: { tokens: r.tokens },
         // Balans vəziyyəti yalnız portala verilir (müştərinin açıq API-sində görünmür)
         ...(req.viaPortal && bill && { billing: { state: bill.state, balanceAzn: bill.balanceAzn, billedAzn: bill.billedAzn, ...(bill.notify && { notify: bill.notify }) } }) });
     } catch (err) {
       console.error(`[chat] ${req.tenant.tenantId}:`, err.status ?? "", err.message);
+      slowLog("xəta");
       if (!req.skipQueryLog) await recordQuery(req.tenant, { message: message.trim(), error: true, sid });
       if ([429, 500, 503].includes(err.status)) return res.status(503).json({ error: "Xidmət müvəqqəti yüklüdür, bir azdan yenə cəhd edin" });
       res.status(500).json({ error: "Xəta baş verdi" });

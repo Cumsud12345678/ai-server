@@ -94,7 +94,8 @@ export async function ingestUrl(tenant, { url, crawl = false }) {
   return source;
 }
 
-async function indexUrlSource(tenant, source) {
+/** Mənbənin səhifələrini yükləyir (indeksləmədən). */
+async function collectPages(source) {
   const pages = [];
   if (source.type === "url") {
     const p = await fetchPage(source.url);
@@ -104,18 +105,49 @@ async function indexUrlSource(tenant, source) {
     await crawlSite(source.url, { onPage: (p) => pages.push(p) });
     if (!pages.length) throw new KbError("Saytdan mətn oxuna bilmədi (səhifələr JavaScript ilə yüklənə və ya robots.txt ilə bağlı ola bilər)", "EMPTY");
   }
+  return pages;
+}
+const hashPages = (pages) => sha(pages.map((p) => p.text).join("\n"));
+
+async function indexUrlSource(tenant, source) {
+  const pages = await collectPages(source);
   const r = await indexPages(tenant, source, pages);
-  return { ...r, pages: pages.length, hash: sha(pages.map((p) => p.text).join("\n")) };
+  return { ...r, pages: pages.length, hash: hashPages(pages) };
 }
 
 /** Sayt mənbəyini yenidən oxuyur (köhnə hissələr uğurlu olandan sonra əvəz olunur). */
-export async function refreshSource(tenant, id) {
+export async function refreshSource(tenant, id, { auto = false } = {}) {
   const source = await getSource(tenant.tenantId, id);
   if (!source) return null;
   if (!["url", "site"].includes(source.type)) throw new KbError("Yalnız sayt mənbələri yenilənə bilər", "NOT_REFRESHABLE");
   if (source.status === "processing") throw new KbError("Mənbə hazırda emal olunur", "BUSY");
+  if (auto) return autoRefresh(tenant, source);
   Object.assign(source, { status: "processing", error: null });
   await putSource(source);
   background(() => run(tenant, source, () => indexUrlSource(tenant, source)));
   return source;
+}
+
+/**
+ * Avtomatik yenilənmə (planlaşdırıcı çağırır): məzmun dəyişməyibsə vektorlaşdırma aparılmır (xərc yoxdur).
+ * Uğursuz olsa köhnə hissələr qalır və mənbə "hazır" qalır (bot sınmır), xəta `refreshError`-da saxlanır.
+ * Qaytarır: işin promise-i (testlər və planlaşdırıcı gözləyə bilər).
+ */
+function autoRefresh(tenant, source) {
+  return background(async () => {
+    const now = () => new Date().toISOString();
+    try {
+      const pages = await collectPages(source);
+      const hash = hashPages(pages);
+      if (hash === source.hash && source.chunks > 0) { Object.assign(source, { lastRefreshAt: now(), refreshError: null, unchanged: true }); }
+      else {
+        const r = await indexPages(tenant, source, pages);
+        Object.assign(source, r, { pages: pages.length, hash, status: "ready", error: null, lastIndexedAt: now(), lastRefreshAt: now(), refreshError: null, unchanged: false });
+      }
+    } catch (e) {
+      if (!(e instanceof KbError) && !e?.code) console.error(`[kb] avto-yenilənmə ${tenant.tenantId} ${source._id}:`, e);
+      Object.assign(source, { status: source.chunks > 0 ? "ready" : "failed", lastRefreshAt: now(), refreshError: failMsg(e) });
+    }
+    try { await putSource(source); } catch (e) { console.error(`[kb] ${tenant.tenantId} ${source._id} statusu yazıla bilmədi:`, e); }
+  });
 }

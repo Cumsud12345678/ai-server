@@ -10,7 +10,7 @@ const STALE_MS = 20 * 60_000;
 const view = (s) => ({
   id: s._id, type: s.type, name: s.name, url: s.url ?? null, status: s.status === "processing" && Date.now() - new Date(s.updatedAt) > STALE_MS ? "failed" : s.status,
   error: s.status === "processing" && Date.now() - new Date(s.updatedAt) > STALE_MS ? "Emal yarımçıq qaldı, yenidən cəhd edin" : s.error,
-  chunks: s.chunks ?? 0, chars: s.chars ?? 0, pages: s.pages ?? 0, size: s.size ?? null, createdAt: s.createdAt, lastIndexedAt: s.lastIndexedAt ?? null,
+  chunks: s.chunks ?? 0, chars: s.chars ?? 0, pages: s.pages ?? 0, size: s.size ?? null, createdAt: s.createdAt, lastIndexedAt: s.lastIndexedAt ?? null, lastRefreshAt: s.lastRefreshAt ?? null, refreshError: s.refreshError ?? null,
 });
 const str = (v, max) => (typeof v === "string" ? v.trim().slice(0, max) : "");
 
@@ -30,7 +30,7 @@ export function registerKbRoutes(app, { serviceAuth, customerTenant }) {
     const t = req.tenant;
     const [sources, chunks] = await Promise.all([listSources(t.tenantId), countChunks(t.tenantId)]);
     res.json({
-      mode: t.profile?.mode ?? "listings", fallbackMessage: t.profile?.fallbackMessage ?? "", defaultFallback: fallbackText({ ...t, profile: { ...t.profile, fallbackMessage: "" } }),
+      mode: t.profile?.mode ?? "listings", autoRefresh: t.profile?.kbAutoRefresh ?? "weekly", fallbackMessage: t.profile?.fallbackMessage ?? "", defaultFallback: fallbackText({ ...t, profile: { ...t.profile, fallbackMessage: "" } }),
       sources: sources.map(view),
       limits: { sources: t.limits?.kbSources ?? (Number(process.env.KB_MAX_SOURCES) || 30), chunks: t.limits?.kbChunks ?? (Number(process.env.KB_MAX_CHUNKS) || 2500), fileBytes: MAX_FILE_BYTES },
       totals: { sources: sources.length, chunks },
