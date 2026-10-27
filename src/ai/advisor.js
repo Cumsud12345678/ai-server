@@ -3,6 +3,7 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { buildToolDeclaration, runTool } from "./searchTool.js";
 import { kbToolDeclaration, runKbTool, sourcesOf } from "../kb/answer.js";
 import { newMeter } from "../billing/pricing.js";
+import { privateDeclarations, privatePrompt, privateToolNames, runPrivateTool } from "../private/privateData.js";
 
 // Ziyarətçi operatorla danışmaq istəyəndə və ya köməkçi kömək edə bilməyəndə çağırılır: vidjet əlaqə formasını göstərir.
 const handoffDeclaration = {
@@ -91,10 +92,10 @@ async function generateWithRetry(client, params) {
   }
 }
 
-async function runWithModel(client, model, { tenant, repo, system, message, history, meter }) {
+async function runWithModel(client, model, { tenant, repo, system, message, history, meter, identity }) {
   const ctx = { listings: [] };
   const both = tenant.profile?.mode === "both";
-  const tools = [buildToolDeclaration(repo.schema), ...(both ? [kbToolDeclaration] : []), handoffDeclaration];
+  const tools = [buildToolDeclaration(repo.schema), ...(both ? [kbToolDeclaration] : []), ...(identity ? privateDeclarations(tenant) : []), handoffDeclaration];
   const contents = [
     ...history.slice(-HISTORY_TURNS).map((h) => ({ role: h.role === "model" ? "model" : "user", parts: [{ text: String(h.text).slice(0, HISTORY_CHARS) }] })),
     { role: "user", parts: [{ text: message }] },
@@ -117,7 +118,7 @@ async function runWithModel(client, model, { tenant, repo, system, message, hist
     contents.push(response.candidates[0].content); // olduğu kimi qaytar
     const parts = [];
     for (const call of calls) {
-      const result = call.name === handoffDeclaration.name ? (ctx.handoff = true, { ok: true, note: "İstifadəçiyə əlaqə formu göstəriləcək. Qısa de: operatora birbaşa qoşa bilmirsən, amma aşağıdakı formada telefon və ya email qoysa operator onunla əlaqə saxlayacaq." }) : call.name === kbToolDeclaration.name ? await runKbTool(tenant, call.args, ctx, client) : await runTool(repo, tenant, call.name, call.args, ctx);
+      const result = call.name === handoffDeclaration.name ? (ctx.handoff = true, { ok: true, note: "İstifadəçiyə əlaqə formu göstəriləcək. Qısa de: operatora birbaşa qoşa bilmirsən, amma aşağıdakı formada telefon və ya email qoysa operator onunla əlaqə saxlayacaq." }) : call.name === kbToolDeclaration.name ? await runKbTool(tenant, call.args, ctx, client) : privateToolNames.has(call.name) ? await runPrivateTool(tenant, identity, call.name, call.args, ctx) : await runTool(repo, tenant, call.name, call.args, ctx);
       parts.push({ functionResponse: { name: call.name, response: { result } } });
     }
     contents.push({ role: "user", parts });
@@ -126,27 +127,27 @@ async function runWithModel(client, model, { tenant, repo, system, message, hist
 }
 
 // Qaytarır: { answer, listings, tokens }.  client: test üçün saxta Gemini müştərisi vermək olar
-export async function advise({ tenant, repo, message, history = [] }, client = defaultClient()) {
+export async function advise({ tenant, repo, message, history = [], identity = null }, client = defaultClient()) {
   // Eyni sual (söhbət tarixçəsi yoxdur) qısa müddət keşdən verilir: token xərcləmir
-  const key = history.length === 0 && CACHE_TTL_MS > 0 && tenant.profile?.mode !== "both" ? cacheKey(tenant, message) : null;
+  const key = !identity && history.length === 0 && CACHE_TTL_MS > 0 && tenant.profile?.mode !== "both" ? cacheKey(tenant, message) : null;
   const hit = key && answerCache.get(key);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) return { answer: hit.answer, listings: hit.listings, searched: hit.searched ?? true, tokens: 0, costUsd: 0, cached: true };
 
-  const system = await buildSystem(tenant, repo);
+  const system = (await buildSystem(tenant, repo)) + privatePrompt(tenant, identity);
   const meter = newMeter(); // uğursuz model cəhdlərinin xərci də hesaba düşür
   let lastErr;
   for (const model of MODELS) {
     try {
-      const { text, ctx } = await runWithModel(client, model, { tenant, repo, system, message, history, meter });
+      const { text, ctx } = await runWithModel(client, model, { tenant, repo, system, message, history, meter, identity });
       const seen = new Set();
       const listings = ctx.listings.filter((l) => !seen.has(l.id) && seen.add(l.id));
       const answer = text || "Cavab hazırlana bilmədi, zəhmət olmasa yenidən cəhd edin.";
-      if (key && text && !ctx.failed && !ctx.handoff) {
+      if (key && text && !ctx.failed && !ctx.handoff && !ctx.private) {
         if (answerCache.size > 500) answerCache.clear();
         answerCache.set(key, { at: Date.now(), answer, listings, searched: Boolean(ctx.searched) });
       }
       const sources = ctx.kbHits?.length ? sourcesOf(ctx.kbHits, []) : [];
-      return { answer, listings, searched: Boolean(ctx.searched), tokens: meter.tokens, costUsd: meter.costUsd, ...(sources.length && { sources }), ...(ctx.handoff && { unanswered: true }) };
+      return { answer, listings, searched: Boolean(ctx.searched), tokens: meter.tokens, costUsd: meter.costUsd, ...(sources.length && { sources }), ...(ctx.handoff && { unanswered: true }), ...(ctx.private && { private: true }) };
     } catch (err) {
       lastErr = err;
       if ([503, 500, 429, 404].includes(err.status)) { console.warn(`[gemini] ${model} alınmadı (${err.status}), növbəti model`); continue; }

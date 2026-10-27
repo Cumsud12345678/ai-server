@@ -123,3 +123,14 @@ Müştərinin öz saytı isə əvvəlki kimi `/v1/chat`, `/v1/listings`, `/v1/us
 - Qeydiyyat açıqdır və yoxlamadan keçən konfiqurasiya avtomatik aktiv olur: hər təsdiqlənmiş email defolt olaraq aylıq 500 AI sorğusu alır (`DEFAULT_MONTHLY_REQUESTS`, `DEFAULT_RATE_PER_MINUTE`). Gemini xərcini bu limitlə idarə et.
 - Xarici API ünvanlarına sorğular mövcud SSRF qorumasından keçir; lokal HTTP ünvanları yalnız `ALLOW_LOCAL_CONNECTORS=1` ilə development üçündür.
 - Tenant-lar `data/customer-tenants.json` faylında saxlanır (bir server prosesi). Bir neçə replica üçün DB-yə köçür.
+
+## Müştəriyə məxsus məlumat (sifariş, ödəniş, sorğu, şikayət, abunə və s.)
+
+Saytın hesabına daxil olmuş istifadəçisi çatdan öz məlumatını soruşa bilər. Məlumat növlərini (`sources`) müştəri özü təyin edir.
+
+- Kimliyi yalnız saytın serveri təsdiqləyir: `v1.<payload>.<HMAC-SHA256>` tokeni (`{sub, exp}`, ömrü ≤ 1 saat), gizli açar `POST /v1/service/tenants/:id/private-data/identity-secret` ilə bir dəfə verilir.
+- Bir alət: `get_my_data({ type, id? })`. `type` yalnız təyin edilmiş növlərdən biri ola bilər, istifadəçi ID parametri yoxdur: ID yalnız yoxlanmış tokendən gəlir. Token yoxdursa alət modelə verilmir.
+- `PUT .../private-data`: `{ baseUrl, auth, apiSecret, sources: [{ key, title, description, path ({userId} və ya userParam), itemsPath, fields: { "Ad": "yol" | { path, type: text|number|date|url, divide, max } }, idField?, ownerField?, lines? }] }`. Ən çox 10 növ, növ başına 20 sahə. Açar şifrələnir (`TENANT_SECRET_ENCRYPTION_KEY`).
+- `ownerField` verilsə, sahibi uyğun gəlməyən sətirlər atılır (müştəri API-si səhv edərsə sızma olmasın).
+- Cavab ≤ 10 qeyd, yalnız təyin edilmiş sahələr, mətn təmizlənir, e-poçt və uzun rəqəmlər maskalanır; şəxsi cavab keşə və sorğu qeydinə düşmür.
+- Limit: sorğuda ≤ 3 çağırış, istifadəçi başına 10 dəqiqədə `PRIVATE_LOOKUPS_PER_10MIN` (defolt 20).

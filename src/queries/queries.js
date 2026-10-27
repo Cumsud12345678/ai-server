@@ -45,7 +45,8 @@ export async function recordQuery(tenant, entry) {
       message: maskPII(entry.message), results: entry.results ?? 0, tokens: entry.tokens ?? 0,
       cached: Boolean(entry.cached), error: Boolean(entry.error),
       ...(cleanSid(entry.sid) && { sid: entry.sid }),
-      ...(typeof entry.answer === "string" && entry.answer && { answer: maskAnswer(entry.answer) }),
+      // Şəxsi məlumat (sifariş/ödəniş) olan cavab mətni heç vaxt saxlanmır
+      ...(entry.private ? { private: true } : typeof entry.answer === "string" && entry.answer ? { answer: maskAnswer(entry.answer) } : {}),
       ...(Number.isFinite(entry.costAzn) && { costAzn: Math.round(entry.costAzn * 1e6) / 1e6 }), // müştəriyə yazılan məbləğ (manat)
     };
     if (mongoEnabled()) { await (await col()).insertOne(doc); return; }

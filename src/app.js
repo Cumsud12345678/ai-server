@@ -11,6 +11,7 @@ import { registerBillingRoutes } from "./billing/routes.js";
 import { sanitizeFilters, compileSchema } from "./data/filters.js";
 import { createRestRepo, LOCAL_SORTABLE_FIELDS } from "./connectors/restRepo.js";
 import { validateFieldSpecs } from "./connectors/mapper.js";
+import { fetchPrivate, newIdentitySecret, preparePrivateData, privateView, validatePrivateData, verifyIdentity } from "./private/privateData.js";
 import { encryptSecret } from "./tenants/secretCrypto.js";
 import { answerFromKb } from "./kb/answer.js";
 import { registerKbRoutes } from "./kb/routes.js";
@@ -294,16 +295,18 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb } = {}) {
   };
 
   async function chat(req, res) {
-    const { message, history, sid } = req.body ?? {};
+    const { message, history, sid, identity: identityToken } = req.body ?? {};
     if (typeof message !== "string" || !message.trim() || message.length > 500)
       return res.status(400).json({ error: "message düzgün deyil (1-500 simvol)" });
     if (!(await gateOr429(req, res))) return;
     try {
       const hist = Array.isArray(history) ? history : [];
+      // Ziyarətçinin kimliyi yalnız saytın imzaladığı tokendən gəlir; səhv/bitmiş token = anonim (söhbət işləməyə davam edir)
+      const identity = identityToken ? verifyIdentity(req.tenant, identityToken) : null;
       const support = req.tenant.profile?.mode === "support";
       const r = support
-        ? await kbFn({ tenant: req.tenant, message: message.trim(), history: hist })
-        : await adviseFn({ tenant: req.tenant, repo: await getRepo(req.tenant), message: message.trim(), history: hist });
+        ? await kbFn({ tenant: req.tenant, message: message.trim(), history: hist, identity })
+        : await adviseFn({ tenant: req.tenant, repo: await getRepo(req.tenant), message: message.trim(), history: hist, identity });
       await addTokens(req.tenant, r.tokens);
       let bill;
       try { bill = await charge(req.tenant, { costUsd: r.costUsd ?? 0, tokens: r.tokens ?? 0 }); }
@@ -311,8 +314,8 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb } = {}) {
       // results: >0 elan, 0 axtarış aparıldı amma tapılmadı, -1 axtarışsız cavab (ümumi sual və s.), -2 operatora yönləndirildi
       const searched = r.searched ?? true;
       const results = support ? (r.unanswered ? 0 : 1) : !searched ? (r.unanswered ? -2 : -1) : (r.listings?.length ?? 0);
-      if (!req.skipQueryLog) await recordQuery(req.tenant, { message: message.trim(), results, tokens: r.tokens, cached: r.cached, costAzn: bill?.billedAzn, sid, answer: r.answer });
-      res.json({ answer: r.answer, listings: r.listings ?? [], ...(r.sources && { sources: r.sources }), ...(r.unanswered && { unanswered: true }), usage: { tokens: r.tokens },
+      if (!req.skipQueryLog) await recordQuery(req.tenant, { message: message.trim(), results, tokens: r.tokens, cached: r.cached, costAzn: bill?.billedAzn, sid, answer: r.answer, private: r.private });
+      res.json({ answer: r.answer, listings: r.listings ?? [], ...(r.sources && { sources: r.sources }), ...(r.unanswered && { unanswered: true }), ...(identityToken && !identity && { identity: "invalid" }), usage: { tokens: r.tokens },
         // Balans vəziyyəti yalnız portala verilir (müştərinin açıq API-sində görünmür)
         ...(req.viaPortal && bill && { billing: { state: bill.state, balanceAzn: bill.balanceAzn, billedAzn: bill.billedAzn, ...(bill.notify && { notify: bill.notify }) } }) });
     } catch (err) {
@@ -351,6 +354,40 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb } = {}) {
     res.json({ enabled: req.tenant.profile?.logQueries !== false, retentionDays: Number(process.env.QUERY_RETENTION_DAYS) || 90,
       ...(await listQueries(req.tenant.tenantId, { before: String(req.query.before ?? "").slice(0, 80), limit: n(req.query.limit, 30), noResults: req.query.noResults === "1", q: String(req.query.q ?? "").slice(0, 100), days: Math.min(n(req.query.days, 30), 90) })) });
   });
+  // ---------- Müştəriyə məxsus məlumat (sifariş / ödəniş) ----------
+  app.get("/v1/service/tenants/:tenantId/private-data", serviceAuth, customerTenant, (req, res) => res.json(privateView(req.tenant)));
+  app.put("/v1/service/tenants/:tenantId/private-data", serviceAuth, customerTenant, async (req, res) => {
+    const { apiSecret, ...input } = req.body ?? {};
+    const old = req.tenant.privateData;
+    const error = validatePrivateData(input, { secretAlreadyStored: Boolean(old?.auth?.encryptedValue), apiSecret });
+    if (error) return res.status(400).json({ error });
+    if (apiSecret !== undefined && (typeof apiSecret !== "string" || apiSecret.length > 500)) return res.status(400).json({ error: "apiSecret düzgün deyil" });
+    const next = preparePrivateData(input, apiSecret, old);
+    await updateCustomerTenant(req.tenant.tenantId, (t) => ({ ...t, privateData: next }));
+    refreshTenants();
+    res.json(privateView({ privateData: next }));
+  });
+  app.delete("/v1/service/tenants/:tenantId/private-data", serviceAuth, customerTenant, async (req, res) => {
+    await updateCustomerTenant(req.tenant.tenantId, (t) => { const { privateData: _p, ...rest } = t; return rest; });
+    refreshTenants();
+    res.json({ ok: true });
+  });
+  // Saytın serverində tokeni imzalamaq üçün gizli açar: yalnız yaradılanda bir dəfə göstərilir, köhnəsi dərhal etibarsız olur.
+  app.post("/v1/service/tenants/:tenantId/private-data/identity-secret", serviceAuth, customerTenant, async (req, res) => {
+    if (!req.tenant.privateData) return res.status(400).json({ error: "Əvvəlcə sifariş/ödəniş mənbəyini qoşun", code: "NO_PRIVATE_DATA" });
+    const secret = newIdentitySecret();
+    await updateCustomerTenant(req.tenant.tenantId, (t) => ({ ...t, privateData: { ...t.privateData, identity: { secretEnc: encryptSecret(secret), createdAt: new Date().toISOString() } } }));
+    refreshTenants();
+    res.status(201).json({ identitySecret: secret });
+  });
+  // Quraşdırma yoxlaması: verilmiş test istifadəçisi üçün müştəri API-sini çağırır (nəticə maskalanmış, ağ siyahı ilə)
+  app.post("/v1/service/tenants/:tenantId/private-data/test", serviceAuth, customerTenant, async (req, res) => {
+    const kind = req.body?.kind, userId = req.body?.userId;
+    if (typeof kind !== "string" || !/^[a-z][a-z0-9_]{1,30}$/.test(kind) || typeof userId !== "string" || !/^[\w.@:+-]{1,100}$/.test(userId)) return res.status(400).json({ error: "kind və userId düzgün deyil" });
+    try { res.json({ ok: true, kind, records: await fetchPrivate(req.tenant, kind, userId) }); }
+    catch (e) { res.status(422).json({ ok: false, error: e.message, code: e.code ?? "TEST_FAILED" }); }
+  });
+
   app.get("/v1/service/tenants/:tenantId/conversations", serviceAuth, customerTenant, async (req, res) => {
     const n = (v, d) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : d);
     res.json({ enabled: req.tenant.profile?.logQueries !== false, ...(await listConversations(req.tenant.tenantId, { before: String(req.query.before ?? "").slice(0, 40), limit: n(req.query.limit, 30), days: Math.min(n(req.query.days, 30), 90) })) });
