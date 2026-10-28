@@ -46,6 +46,20 @@ export function renderTemplate(tpl, obj) {
   return missing ? null : out.replace(/\s+/g, " ").trim();
 }
 
+/** "1 200,50 AZN", "₼1.200,50", "12.5 USD" → 1200.5 / 1200.5 / 12.5. Rəqəm yoxdursa null. */
+export function looseNumber(v) {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  const m = String(v ?? "").replace(/[\u00a0\u202f]/g, " ").match(/-?\d[\d ]*(?:[.,]\d+)*/);
+  if (!m) return null;
+  let s = m[0].replace(/ /g, "");
+  const lastDot = s.lastIndexOf("."), lastComma = s.lastIndexOf(",");
+  if (lastDot >= 0 && lastComma >= 0) s = lastDot > lastComma ? s.replace(/,/g, "") : s.replace(/\./g, "").replace(",", ".");
+  else if (lastComma >= 0) s = (s.match(/,/g).length > 1 || s.length - lastComma - 1 === 3) ? s.replace(/,/g, "") : s.replace(",", ".");
+  else if (lastDot >= 0 && (s.match(/\./g).length > 1 || s.length - lastDot - 1 === 3)) s = s.replace(/\./g, "");
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+
 export function coerce(v, type) {
   if (v === undefined || v === null) return null;
   if (type === "number") {
@@ -69,6 +83,7 @@ function resolveField(item, key, raw, lookup, forcedType) {
   let v = spec.template ? renderTemplate(spec.template, item) : getPath(item, spec.path);
   if (spec.lookup && lookup) v = lookup(spec.lookup, v); // ID → ad (vocabulary-dən)
   if (spec.stripHtml && typeof v === "string") v = stripHtml(v);
+  if (spec.loose && typeof v === "string") v = looseNumber(v);
   v = coerce(v, spec.type ?? forcedType ?? STANDARD_TYPES[key] ?? "string");
   // qiymət sentlə gəlirsə: divide 100; (2 onluq işarəyə yuvarlanır ki, 15.000000001 çıxmasın)
   if (typeof v === "number") {
@@ -102,6 +117,7 @@ export function validateFieldSpecs(fields = {}) {
     if (!raw || typeof raw !== "object") return null;
     for (const k of ["divide", "multiply"])
       if (raw[k] !== undefined && !(typeof raw[k] === "number" && Number.isFinite(raw[k]) && raw[k] > 0 && raw[k] <= 1e6)) return `${where}.${k} 0-dan böyük rəqəm olmalıdır`;
+    if (raw.loose !== undefined && typeof raw.loose !== "boolean") return `${where}.loose true və ya false olmalıdır`;
     if (raw.stripHtml !== undefined && typeof raw.stripHtml !== "boolean") return `${where}.stripHtml true və ya false olmalıdır`;
     return null;
   };

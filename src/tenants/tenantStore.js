@@ -12,7 +12,7 @@ function load() {
   const list = [...JSON.parse(readFileSync(file, "utf8")), ...listCustomerTenants()];
   byHash = new Map(); byId = new Map();
   for (const t of list) {
-    if (!t.tenantId || !t.apiKeyHash || (t.profile?.mode !== "support" && !["memory", "mongo", "rest"].includes(t.source?.type))) {
+    if (!t.tenantId || !t.apiKeyHash || (t.profile?.mode !== "support" && !["memory", "mongo", "rest", "feed"].includes(t.source?.type))) {
       console.warn(`[tenants] natamam konfiqurasiya atıldı: ${t.tenantId ?? "(adsız)"}`);
       continue;
     }

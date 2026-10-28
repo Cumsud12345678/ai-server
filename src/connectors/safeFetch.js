@@ -66,3 +66,31 @@ export async function safeFetchJson(urlStr, { method = "GET", headers = {}, body
     throw new ConnectorError(`Müştəri API-sinə qoşulmaq alınmadı (${e.cause?.code ?? e.message})`, "NETWORK");
   }
 }
+
+/** Feed faylını/linkini TƏHLÜKƏSİZ yükləyir (https + xarici ünvan, ≤3 redirect hər dəfə yenidən yoxlanır, ölçü və vaxt limiti). Mətn qaytarır. */
+export async function safeFetchText(urlStr, { timeoutMs = 20_000, maxBytes = 5_000_000, redirects = 3 } = {}) {
+  let current = urlStr;
+  try {
+    for (let hop = 0; hop <= redirects; hop++) {
+      const url = await assertSafeUrl(current);
+      const res = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(timeoutMs), headers: { accept: "text/csv, application/json, application/xml, text/xml, */*", "user-agent": "ChatbotFeedBot/1.0" } });
+      if (res.status >= 300 && res.status < 400 && res.headers.get("location")) { current = new URL(res.headers.get("location"), url).toString(); continue; }
+      if (!res.ok) throw new ConnectorError(`Link ${res.status} qaytardı`, `HTTP_${res.status}`);
+      const reader = res.body.getReader();
+      const chunks = []; let total = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.length;
+        if (total > maxBytes) { await reader.cancel(); throw new ConnectorError(`Fayl çox böyükdür (maksimum ${Math.round(maxBytes / 1e6)} MB)`, "TOO_LARGE"); }
+        chunks.push(value);
+      }
+      return Buffer.concat(chunks).toString("utf8");
+    }
+    throw new ConnectorError("Çox sayda yönləndirmə", "REDIRECT");
+  } catch (e) {
+    if (e instanceof ConnectorError) throw e;
+    if (e.name === "TimeoutError" || e.name === "AbortError") throw new ConnectorError("Link vaxtında cavab vermədi", "TIMEOUT");
+    throw new ConnectorError(`Linkə qoşulmaq alınmadı (${e.cause?.code ?? e.message})`, "NETWORK");
+  }
+}

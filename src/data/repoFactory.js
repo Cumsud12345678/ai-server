@@ -18,6 +18,12 @@ export async function getRepo(tenant) {
   } else if (type === "rest") {
     const { createRestRepo } = await import("../connectors/restRepo.js");
     repo = createRestRepo(tenant);
+  } else if (type === "feed") {
+    const { createFeedRepo } = await import("../connectors/feedRepo.js");
+    const { getFeed } = await import("../connectors/feedStore.js");
+    const stored = await getFeed(id);
+    if (!stored?.items?.length) throw new Error("Feed məlumatı tapılmadı");
+    repo = createFeedRepo(tenant, stored.items);
   } else {
     throw new Error(`Naməlum data mənbəyi tipi: ${type}`);
   }

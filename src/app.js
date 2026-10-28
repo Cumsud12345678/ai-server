@@ -14,6 +14,11 @@ import { canSpend, charge, deleteTenantBilling } from "./billing/billing.js";
 import { registerBillingRoutes } from "./billing/routes.js";
 import { sanitizeFilters, compileSchema } from "./data/filters.js";
 import { createRestRepo, LOCAL_SORTABLE_FIELDS } from "./connectors/restRepo.js";
+import { createFeedRepo } from "./connectors/feedRepo.js";
+import { autoMap } from "./connectors/feedMap.js";
+import { FEED_MAX_BYTES } from "./connectors/feedParse.js";
+import { feedMeta, loadItems, refreshFeed, validateFeedSource } from "./connectors/feedService.js";
+import { deleteFeed, putFeed } from "./connectors/feedStore.js";
 import { validateFieldSpecs } from "./connectors/mapper.js";
 import { fetchPrivate, newIdentitySecret, preparePrivateData, privateView, validatePrivateData, verifyIdentity } from "./private/privateData.js";
 import { encryptSecret } from "./tenants/secretCrypto.js";
@@ -38,7 +43,11 @@ function validateConfig(body = {}, { secretAlreadyStored = false } = {}) {
   const mode = body.profile?.mode ?? "listings";
   if (!MODES.includes(mode)) return "profile.mode listings, support və ya both olmalıdır";
   if (mode === "support") return validateProfile(body.profile ?? {}); // dəstək botunun elan mənbəyi yoxdur
-  if (!source || source.type !== "rest") return "source.type 'rest' olmalıdır";
+  if (source?.type === "feed") {
+    if (body.feedText !== undefined && (typeof body.feedText !== "string" || Buffer.byteLength(body.feedText) > FEED_MAX_BYTES)) return `feedText mətn olmalıdır (maksimum ${Math.round(FEED_MAX_BYTES / 1e6)} MB)`;
+    return validateFeedSource(source) ?? validateProfile(body.profile ?? {});
+  }
+  if (!source || source.type !== "rest") return "source.type 'rest' və ya 'feed' olmalıdır";
   if (typeof source.baseUrl !== "string" || !/^https:\/\//i.test(source.baseUrl)) {
     if (!(process.env.ALLOW_LOCAL_CONNECTORS === "1" && typeof source.baseUrl === "string" && /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(source.baseUrl)))
       return "baseUrl HTTPS ünvanı olmalıdır";
@@ -124,8 +133,8 @@ function prepareSource(source, apiSecret, previousSource) {
 }
 
 // Konfiqurasiya ilə müştərinin API-sinə real sorğu göndərir.
-async function probe(source, testFilters) {
-  const repo = createRestRepo({ tenantId: "config-test", source });
+async function probe(source, testFilters, feedItems) {
+  const repo = source.type === "feed" ? createFeedRepo({ tenantId: "config-test", source }, feedItems) : createRestRepo({ tenantId: "config-test", source });
   const result = await repo.searchWithDebug(sanitizeFilters(testFilters ?? {}, { maxResults: 3, schema: repo.schema }));
   return {
     supportedFilters: repo.supportedFilters,
@@ -137,8 +146,10 @@ async function probe(source, testFilters) {
 }
 
 // Aktivləşdirmə/yeniləmə üçün: heç olmasa 1 elan düzgün oxunmalıdır.
-function probeProblem(r) {
+function probeProblem(r, source) {
   if (r.sampleCount > 0) return null;
+  if (source?.type === "feed")
+    return { code: "MAPPING_FAILED", error: r.debug.rawCount > 0 ? `Faylda ${r.debug.rawCount} sətir var, amma sütun uyğunlaşdırması səhvdir (id və başlıq sütunu lazımdır): ${[...new Set(r.debug.dropped ?? [])].slice(0, 3).join(", ")}` : "Faylda heç bir sətir tapılmadı" };
   if (r.debug.rawCount > 0)
     return { code: "MAPPING_FAILED", error: `Elanlar oxundu, amma sahə xəritələməsi səhvdir: ${[...new Set(r.debug.dropped ?? [])].slice(0, 3).join(", ")}` };
   return { code: "NO_LISTINGS", error: "Elan API-sindən heç bir elan gəlmədi. Xəritələməni yoxlaya bilmək üçün saytda ən azı bir elan olmalıdır." };
@@ -150,7 +161,10 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
   const smallJson = express.json({ limit: "100kb" });
   // Şəkilli sual yalnız portal marşrutundadır və öz (böyük) limitini qoyur; fayl yükləmə də öz limitini özü qoyur
   const chatJson = express.json({ limit: "4mb" });
-  app.use((req, res, next) => (req.path.endsWith("/kb/files") ? next() : /^\/v1\/service\/tenants\/[^/]+\/chat$/.test(req.path) ? chatJson(req, res, next) : smallJson(req, res, next)));
+  // Fayl/feed yükləmə: mətn gövdədə gəlir (5 MB + ehtiyat)
+  const feedJson = express.json({ limit: "7mb" });
+  const FEED_PATHS = /^\/v1\/service\/(feed\/preview|config\/test|tenants|tenants\/[^/]+\/(config|feed\/refresh))$/;
+  app.use((req, res, next) => (req.path.endsWith("/kb/files") ? next() : /^\/v1\/service\/tenants\/[^/]+\/chat$/.test(req.path) ? chatJson(req, res, next) : FEED_PATHS.test(req.path) ? feedJson(req, res, next) : smallJson(req, res, next)));
 
   app.get("/health", (req, res) => res.json({ ok: true }));
 
@@ -179,7 +193,9 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
     const error = validateConfig(body);
     if (error) return res.status(400).json({ error });
     try {
-      res.json({ ok: true, ...(await probe(prepareSource(body.source, body.apiSecret), body.testFilters)) });
+      const src = prepareSource(body.source, body.apiSecret);
+      const parsed = src.type === "feed" ? await loadItems(src.feed, body.feedText) : null;
+      res.json({ ok: true, ...(await probe(src, body.testFilters, parsed?.items)) });
     } catch (err) {
       res.status(422).json({ ok: false, error: err.message, code: err.code ?? "CONFIG_TEST_FAILED" });
     }
@@ -190,15 +206,16 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
     const error = validateConfig(body);
     if (error) return res.status(400).json({ error });
     const supportOnly = body.profile?.mode === "support";
-    let source, checked = { sampleCount: 0, sampleListings: [] };
+    let source, checked = { sampleCount: 0, sampleListings: [] }, feedParsed = null;
     if (!supportOnly) {
       try {
         source = prepareSource(body.source, body.apiSecret);
-        checked = await probe(source, body.testFilters);
+        if (source.type === "feed") feedParsed = await loadItems(source.feed, body.feedText);
+        checked = await probe(source, body.testFilters, feedParsed?.items);
       } catch (err) {
         return res.status(422).json({ ok: false, error: err.message, code: err.code ?? "CONFIG_TEST_FAILED" });
       }
-      const problem = probeProblem(checked);
+      const problem = probeProblem(checked, source);
       if (problem) return res.status(422).json({ ok: false, ...problem, debug: checked.debug });
     }
 
@@ -213,8 +230,12 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
       },
       createdAt: new Date().toISOString(), profile, ...(source && { source }),
     };
-    try { await addCustomerTenant(tenant); refreshTenants(); }
-    catch (err) { return res.status(500).json({ error: "Müştəri aktivləşdirilə bilmədi", detail: err.message }); }
+    if (feedParsed) tenant.source.feed = feedMeta(source.feed, feedParsed, feedParsed.items.length);
+    try {
+      if (feedParsed) await putFeed(tenantId, { items: feedParsed.items });
+      await addCustomerTenant(tenant); refreshTenants();
+    }
+    catch (err) { if (feedParsed) await deleteFeed(tenantId).catch(() => {}); return res.status(500).json({ error: "Müştəri aktivləşdirilə bilmədi", detail: err.message }); }
     // API açarı yalnız bir dəfə qaytarılır; DB-də yalnız hash-i qalır.
     res.status(201).json({ ok: true, tenantId, apiKey, sampleCount: checked.sampleCount, sampleListings: checked.sampleListings, limits: tenant.limits });
   });
@@ -225,19 +246,30 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
     const error = validateConfig(body, { secretAlreadyStored: !!old.source?.auth?.encryptedValue });
     if (error) return res.status(400).json({ error });
     const supportOnly = body.profile?.mode === "support";
-    let source, checked = { sampleCount: 0, sampleListings: [] };
+    let source, checked = { sampleCount: 0, sampleListings: [] }, feedParsed = null;
     if (!supportOnly) {
       try {
         source = prepareSource(body.source, body.apiSecret, old.source);
-        checked = await probe(source, body.testFilters);
+        if (source.type === "feed") {
+          // Fayl/link dəyişməyibsə (yalnız xəritələmə dəyişir) saxlanmış sətirlər istifadə olunur
+          const same = old.source?.type === "feed" && !body.feedText && (source.feed.url ?? "") === (old.source.feed?.url ?? "");
+          feedParsed = await loadItems(same ? { ...source.feed, url: undefined } : source.feed, body.feedText, { tenantId: old.tenantId });
+        }
+        checked = await probe(source, body.testFilters, feedParsed?.items);
       } catch (err) {
         return res.status(422).json({ ok: false, error: err.message, code: err.code ?? "CONFIG_TEST_FAILED" });
       }
-      const problem = probeProblem(checked);
+      const problem = probeProblem(checked, source);
       if (problem) return res.status(422).json({ ok: false, ...problem, debug: checked.debug });
     }
 
     const profile = mergeProfile(old.profile, body.profile ?? {}, { businessName: body.businessName.trim(), domain: body.domain.trim() });
+    if (feedParsed) {
+      const meta = feedMeta(source.feed, feedParsed, feedParsed.items.length);
+      if (feedParsed.stored && old.source?.feed?.updatedAt) meta.updatedAt = old.source.feed.updatedAt;
+      source.feed = meta;
+      if (!feedParsed.stored) await putFeed(old.tenantId, { items: feedParsed.items });
+    } else if (old.source?.type === "feed") await deleteFeed(old.tenantId);
     await updateCustomerTenant(old.tenantId, (t) => {
       const { source: _old, ...rest } = t;
       return { ...rest, language: profile.language, profile, ...(source && { source }), configUpdatedAt: new Date().toISOString() };
@@ -276,8 +308,43 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
     await deleteTenantUsage(id);
     await clearQueries(id);
     await deleteTenantKb(id);
+    await deleteFeed(id);
     await deleteTenantBilling(id);
     res.json({ ok: true });
+  });
+
+  // Fayl/link ilə onboarding: faylı oxuyur, sütunları göstərir və xəritələmə təklif edir (heç nə saxlanmır)
+  app.post("/v1/service/feed/preview", serviceAuth, async (req, res) => {
+    const b = req.body ?? {};
+    const feed = { ...(typeof b.url === "string" && b.url && { url: b.url }), ...(b.format && { format: b.format }), ...(typeof b.itemsPath === "string" && b.itemsPath && { itemsPath: b.itemsPath }), ...(b.delimiter && { delimiter: b.delimiter }) };
+    if (b.feedText !== undefined && typeof b.feedText !== "string") return res.status(400).json({ error: "feedText mətn olmalıdır" });
+    const bad = validateFeedSource({ feed, response: { fields: {} } });
+    if (bad && !bad.startsWith("source.response")) return res.status(400).json({ error: bad });
+    try {
+      const parsed = await loadItems(feed, b.feedText);
+      const suggestion = autoMap(parsed.items);
+      const repo = createFeedRepo({ source: { response: { fields: suggestion.fields, defaults: suggestion.defaults } } }, parsed.items);
+      const sample = (await repo.searchWithDebug({ limit: 3 })).listings;
+      res.json({ ok: true, format: parsed.format, itemsPath: parsed.itemsPath, delimiter: parsed.delimiter ?? null, count: parsed.items.length, truncated: Boolean(parsed.truncated), columns: suggestion.columns, suggestion: { fields: suggestion.fields, defaults: suggestion.defaults }, sample, rawSample: parsed.items.slice(0, 2) });
+    } catch (err) {
+      res.status(422).json({ ok: false, error: err.message, code: err.code ?? "FEED_FAILED" });
+    }
+  });
+
+  // Feed vəziyyəti (panel üçün): say, son yenilənmə, link, xəta
+  app.get("/v1/service/tenants/:tenantId/feed", serviceAuth, customerTenant, (req, res) => {
+    const s = req.tenant.source;
+    res.json({ enabled: s?.type === "feed", feed: s?.type === "feed" ? s.feed ?? null : null });
+  });
+
+  // Feed-i yenilə: link feed-i yenidən oxunur; yüklənmiş fayl üçün feedText göndərilir. Xəritələmə pozulsa köhnə data qalır.
+  app.post("/v1/service/tenants/:tenantId/feed/refresh", serviceAuth, customerTenant, async (req, res) => {
+    if (req.tenant.source?.type !== "feed") return res.status(400).json({ error: "Bu hesab fayl/feed mənbəyi ilə qoşulmayıb", code: "NOT_FEED" });
+    const text = req.body?.feedText;
+    if (text !== undefined && typeof text !== "string") return res.status(400).json({ error: "feedText mətn olmalıdır" });
+    if (!text && !req.tenant.source.feed?.url) return res.status(400).json({ error: "Yeni fayl yüklə (bu hesabda link yoxdur)", code: "NO_FEED" });
+    try { res.json({ ok: true, ...(await refreshFeed(req.tenant, { text })) }); }
+    catch (err) { res.status(422).json({ ok: false, error: err.message, code: err.code ?? "FEED_FAILED" }); }
   });
 
   // ---------- Müştəri API-si (açarla) ----------
