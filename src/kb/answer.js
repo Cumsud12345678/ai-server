@@ -44,12 +44,12 @@ ${p.generalKnowledge === false
 Ton: ${p.tone ?? "dostcasına, peşəkar"}.${p.extraInstructions ? "\n" + p.extraInstructions : ""}${privatePrompt(tenant, identity)}${sid ? actionsPrompt(tenant, identity) : ""}${procedurePrompt(proc)}`;
 }
 
-const header = (c) => [c.title, c.heading].filter(Boolean).join(" — ");
-function contextBlock(hits) {
+export const header = (c) => [c.title, c.heading].filter(Boolean).join(" — ");
+export function contextBlock(hits) {
   return hits.map((h, i) => `[${i + 1}] ${header(h.chunk)}${h.chunk.url ? ` (${h.chunk.url})` : ""}\n${h.chunk.text}`).join("\n\n");
 }
 
-async function generate(client, params) {
+export async function generate(client, params) {
   for (let attempt = 0; ; attempt++) {
     try { return await client.models.generateContent(params); }
     catch (err) {

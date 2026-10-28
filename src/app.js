@@ -27,6 +27,7 @@ import { encryptSecret } from "./tenants/secretCrypto.js";
 import { actionsView, decideAction, newSigningSecret, prepareActions, testAction, validateActions } from "./actions/actions.js";
 import { clearActionLog, listActionLog } from "./actions/log.js";
 import { answerFromKb } from "./kb/answer.js";
+import { draftReply, validDraftInput } from "./kb/draft.js";
 import { registerKbRoutes } from "./kb/routes.js";
 import { deleteTenantKb } from "./kb/store.js";
 
@@ -159,7 +160,7 @@ function probeProblem(r, source) {
   return { code: "NO_LISTINGS", error: "Elan API-sindən heç bir elan gəlmədi. Xəritələməni yoxlaya bilmək üçün saytda ən azı bir elan olmalıdır." };
 }
 
-export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = describeImage, transcribeFn = transcribeAudio, insightsFn = analyzeTopics } = {}) {
+export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = describeImage, transcribeFn = transcribeAudio, insightsFn = analyzeTopics, draftFn = draftReply } = {}) {
   const app = express();
   app.disable("x-powered-by");
   const smallJson = express.json({ limit: "100kb" });
@@ -627,6 +628,21 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
     } catch (e) {
       console.error(`[insights] ${req.tenant?.tenantId}:`, e.message);
       res.status(502).json({ error: "Təhlil alınmadı, bir az sonra yenidən yoxla", code: "INSIGHTS_FAILED" });
+    }
+  });
+  // Operator köməkçisi: canlı söhbət üçün cavab qaralaması (balansdan çıxılır; heç nə ziyarətçiyə getmir)
+  app.post("/v1/service/tenants/:tenantId/draft", serviceAuth, customerTenant, async (req, res) => {
+    if (!validDraftInput(req.body)) return res.status(400).json({ error: "messages düzgün deyil" });
+    const funds = await canSpend(req.tenant);
+    if (!funds.ok) return res.status(402).json({ error: funds.message, code: funds.code });
+    try {
+      const r = await draftFn({ tenant: req.tenant, messages: req.body.messages.slice(-12).map((m) => ({ from: m.from, text: m.text.slice(0, 600) })), context: (req.body.context ?? []).slice(-6).map((m) => ({ role: m.role, text: m.text.slice(0, 400) })) });
+      await addTokens(req.tenant, r.tokens);
+      try { await charge(req.tenant, { costUsd: r.costUsd ?? 0, tokens: r.tokens ?? 0 }); } catch (e) { console.error(`[billing] ${req.tenant.tenantId}:`, e.message); }
+      res.json({ draft: r.draft, usage: { tokens: r.tokens } });
+    } catch (e) {
+      console.error(`[draft] ${req.tenant?.tenantId}:`, e.message);
+      res.status(502).json({ error: "Qaralama alınmadı, bir az sonra yenidən cəhd edin", code: "DRAFT_FAILED" });
     }
   });
   app.delete("/v1/service/tenants/:tenantId/queries", serviceAuth, customerTenant, async (req, res) => { await clearQueries(req.tenant.tenantId); res.json({ ok: true }); });
