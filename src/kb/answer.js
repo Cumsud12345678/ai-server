@@ -3,6 +3,7 @@ import { Type } from "@google/genai";
 import { geminiClient } from "./client.js";
 import { searchKb } from "./search.js";
 import { exactAnswer } from "./qa.js";
+import { procedureHit, procedurePrompt } from "./proc.js";
 import { addInbox } from "./store.js";
 import { newMeter } from "../billing/pricing.js";
 import { maskPII, queryLoggingOn } from "../queries/queries.js";
@@ -24,7 +25,7 @@ export const fallbackText = (tenant) => tenant.profile?.fallbackMessage?.trim() 
 
 const DEFAULT_LANG = { az: "Azərbaycan dili (Latın əlifbası)", en: "English", ru: "русский" };
 
-function system(tenant, identity) {
+function system(tenant, identity, proc = null) {
   const p = tenant.profile ?? {};
   return `Sən ${p.businessName ? `"${p.businessName}" şirkətinin` : "şirkətin"} dəstək operatorusan (ünvan: ${p.domain ?? "-"}). Şirkətin fəaliyyət sahəsini yalnız KONTEKSTdən öyrən; adından və ya domen adından təxmin etmə.
 QAYDALAR:
@@ -39,7 +40,7 @@ ${p.generalKnowledge === false
 7. İstifadəçi operatorla, canlı insanla və ya menecerlə danışmaq istəyirsə: operatora birbaşa qoşa bilmədiyini, amma əlaqə formasında telefon və ya email qoysa operatorun onunla əlaqə saxlayacağını yaz və [[NO_ANSWER]] əlavə et.
 8. Elan və ya məhsul axtarışı, göstərmək və ya satış təklif etmə: bu rejimdə yalnız suallara cavab verirsən. Özünü "məsləhətçi" və ya "elan köməkçisi" kimi təqdim etmə.
 9. Cavabdan sonra ayrıca sətirdə istifadə etdiyin kontekst nömrələrini yaz, məsələn: [[S:1,3]]. NO_ANSWER halında bunu yazma.
-Ton: ${p.tone ?? "dostcasına, peşəkar"}.${p.extraInstructions ? "\n" + p.extraInstructions : ""}${privatePrompt(tenant, identity)}`;
+Ton: ${p.tone ?? "dostcasına, peşəkar"}.${p.extraInstructions ? "\n" + p.extraInstructions : ""}${privatePrompt(tenant, identity)}${procedurePrompt(proc)}`;
 }
 
 const header = (c) => [c.title, c.heading].filter(Boolean).join(" — ");
@@ -92,14 +93,17 @@ const retrievalQuery = (message, history) => {
 
 /** Qaytarır: { answer, sources, unanswered, tokens, costUsd, listings: [] } */
 export async function answerFromKb({ tenant, message, history = [], identity = null }, client = geminiClient()) {
-  const { hits, relevant, weak, empty } = await searchKb(tenant.tenantId, retrievalQuery(message, history), { k: 5, client });
+  const found = await searchKb(tenant.tenantId, retrievalQuery(message, history), { k: 5, client });
+  const { relevant, weak, empty } = found;
+  const proc = procedureHit(found.hits);
+  const hits = found.hits.filter((h) => !h.chunk.proc); // ssenari parçaları kontekstə düşmür: yalnız təlimat kimi verilir
   // Sahibin yazdığı dəqiq cavab: modelsiz, sözbəsöz
   const exact = exactAnswer(hits);
   if (exact) return { answer: exact.answer, sources: [], unanswered: false, tokens: 0, costUsd: 0, listings: [], qa: true };
   const general = tenant.profile?.generalKnowledge !== false;
-  const usable = relevant || weak; // zəif uyğunluqda da ən yaxın hissələri veririk, model özü yoxlayır
+  const usable = relevant || weak || Boolean(proc); // zəif uyğunluqda da ən yaxın hissələri veririk, model özü yoxlayır
   const privateAware = Boolean(tenant.privateData?.sources?.length); // sifariş/ödəniş sualı sənədlərdə olmur: model yenə də "daxil ol" deyə bilsin
-  if (!usable && !general && !privateAware) {
+  if (!usable && !general && !privateAware && !proc) {
     await logUnanswered(tenant, message, empty ? "empty" : "no_match");
     return { answer: fallbackText(tenant), sources: [], unanswered: true, tokens: 0, costUsd: 0, listings: [] };
   }
@@ -116,7 +120,7 @@ export async function answerFromKb({ tenant, message, history = [], identity = n
       const convo = [...contents];
       let res;
       for (let i = 0; ; i++) {
-        res = await generate(client, { model, contents: convo, config: { systemInstruction: system(tenant, identity), ...(ptools.length && { tools: [{ functionDeclarations: ptools }] }), ...(THINKING_BUDGET !== null && { thinkingConfig: { thinkingBudget: THINKING_BUDGET } }) } });
+        res = await generate(client, { model, contents: convo, config: { systemInstruction: system(tenant, identity, proc), ...(ptools.length && { tools: [{ functionDeclarations: ptools }] }), ...(THINKING_BUDGET !== null && { thinkingConfig: { thinkingBudget: THINKING_BUDGET } }) } });
         meter.add(model, res.usageMetadata);
         const calls = ptools.length ? res.functionCalls : null;
         if (!calls?.length || i >= 3) break;
@@ -149,7 +153,11 @@ export const kbToolDeclaration = {
 export async function runKbTool(tenant, args, ctx, client) {
   const query = String(args?.query ?? "").slice(0, 300);
   if (!query) return { error: "query tələb olunur" };
-  const { hits, relevant } = await searchKb(tenant.tenantId, query, { k: 4, client });
+  const found = await searchKb(tenant.tenantId, query, { k: 4, client });
+  const { relevant } = found;
+  const hits = found.hits.filter((h) => !h.chunk.proc);
+  const proc = procedureHit(found.hits);
+  if (proc) return { found: true, procedure: { name: proc.name, steps: proc.steps, note: "Bu, sahibin təyin etdiyi ssenaridir: addımlara sıra ilə, söhbət tərzində əməl et, uydurma." }, ...(relevant && hits.length && { snippets: hits.map((h) => ({ source: header(h.chunk), url: h.chunk.url, text: h.chunk.text })) }) };
   if (!relevant) { ctx.kbMiss = true; return { found: false, note: "Sənədlərdə bu mövzuda məlumat tapılmadı. Uydurma, bilmədiyini de." }; }
   ctx.kbHits = [...(ctx.kbHits ?? []), ...hits];
   return { found: true, snippets: hits.map((h) => ({ source: header(h.chunk), url: h.chunk.url, text: h.chunk.text })) };

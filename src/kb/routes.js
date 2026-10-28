@@ -4,6 +4,7 @@ import { listSources, listInbox, updateInbox, deleteInbox, deleteSource, addInbo
 import { ingestFile, ingestText, ingestUrl, refreshSource, MAX_FILE_BYTES } from "./ingest.js";
 import { KbError } from "./extract.js";
 import { createQa, updateQa, MAX_QUESTIONS, MAX_QUESTION_CHARS, MAX_ANSWER_CHARS } from "./qa.js";
+import { createProc, updateProc, MAX_TRIGGERS, MAX_TRIGGER_CHARS, MAX_NAME_CHARS, MAX_STEPS_CHARS } from "./proc.js";
 import { maskPII } from "../queries/queries.js";
 import { fallbackText } from "./answer.js";
 
@@ -13,6 +14,7 @@ const view = (s) => ({
   error: s.status === "processing" && Date.now() - new Date(s.updatedAt) > STALE_MS ? "Emal yarımçıq qaldı, yenidən cəhd edin" : s.error,
   chunks: s.chunks ?? 0, chars: s.chars ?? 0, pages: s.pages ?? 0, size: s.size ?? null, createdAt: s.createdAt, lastIndexedAt: s.lastIndexedAt ?? null, lastRefreshAt: s.lastRefreshAt ?? null, refreshError: s.refreshError ?? null,
   ...(s.type === "qa" && { questions: s.questions ?? [], answer: s.answer ?? "" }),
+  ...(s.type === "proc" && { triggers: s.triggers ?? [], steps: s.steps ?? "" }),
 });
 const str = (v, max) => (typeof v === "string" ? v.trim().slice(0, max) : "");
 
@@ -34,8 +36,8 @@ export function registerKbRoutes(app, { serviceAuth, customerTenant }) {
     res.json({
       mode: t.profile?.mode ?? "listings", autoRefresh: t.profile?.kbAutoRefresh ?? "weekly", fallbackMessage: t.profile?.fallbackMessage ?? "", defaultFallback: fallbackText({ ...t, profile: { ...t.profile, fallbackMessage: "" } }),
       sources: sources.map(view),
-      limits: { qa: t.limits?.kbQa ?? (Number(process.env.KB_MAX_QA) || 300), qaQuestions: MAX_QUESTIONS, qaQuestionChars: MAX_QUESTION_CHARS, qaAnswerChars: MAX_ANSWER_CHARS, sources: t.limits?.kbSources ?? (Number(process.env.KB_MAX_SOURCES) || 30), chunks: t.limits?.kbChunks ?? (Number(process.env.KB_MAX_CHUNKS) || 2500), fileBytes: MAX_FILE_BYTES },
-      totals: { sources: sources.filter((x) => x.type !== "qa").length, qa: sources.filter((x) => x.type === "qa").length, chunks },
+      limits: { qa: t.limits?.kbQa ?? (Number(process.env.KB_MAX_QA) || 300), qaQuestions: MAX_QUESTIONS, qaQuestionChars: MAX_QUESTION_CHARS, qaAnswerChars: MAX_ANSWER_CHARS, proc: t.limits?.kbProc ?? (Number(process.env.KB_MAX_PROC) || 20), procTriggers: MAX_TRIGGERS, procTriggerChars: MAX_TRIGGER_CHARS, procNameChars: MAX_NAME_CHARS, procStepsChars: MAX_STEPS_CHARS, sources: t.limits?.kbSources ?? (Number(process.env.KB_MAX_SOURCES) || 30), chunks: t.limits?.kbChunks ?? (Number(process.env.KB_MAX_CHUNKS) || 2500), fileBytes: MAX_FILE_BYTES },
+      totals: { sources: sources.filter((x) => x.type !== "qa" && x.type !== "proc").length, qa: sources.filter((x) => x.type === "qa").length, proc: sources.filter((x) => x.type === "proc").length, chunks },
     });
   }));
 
@@ -61,6 +63,15 @@ export function registerKbRoutes(app, { serviceAuth, customerTenant }) {
   app.put(`${base}/qa/:id`, ...guard, wrap(async (req, res) => {
     const s = await updateQa(req.tenant, req.params.id, req.body);
     if (!s) return res.status(404).json({ error: "Cütlük tapılmadı" });
+    res.json({ source: view(s) });
+  }));
+  // Ssenarilər (addım-addım qaydalar)
+  app.post(`${base}/proc`, ...guard, wrap(async (req, res) => {
+    res.status(201).json({ source: view(await createProc(req.tenant, req.body)) });
+  }));
+  app.put(`${base}/proc/:id`, ...guard, wrap(async (req, res) => {
+    const s = await updateProc(req.tenant, req.params.id, req.body);
+    if (!s) return res.status(404).json({ error: "Ssenari tapılmadı" });
     res.json({ source: view(s) });
   }));
   app.post(`${base}/sources/:id/refresh`, ...guard, wrap(async (req, res) => {
