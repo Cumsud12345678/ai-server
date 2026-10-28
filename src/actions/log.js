@@ -32,6 +32,29 @@ export async function listActionLog(tenantId, limit = 100) {
   return rows.map((d) => ({ id: d._id, at: new Date(d.at).toISOString(), key: d.key, title: d.title, status: d.status, httpStatus: d.httpStatus ?? null, subject: d.subject ?? null, channel: d.channel ?? null, params: d.params ?? {}, ms: d.ms ?? null }));
 }
 
+/** Dövr üzrə say: ümumi icra olunanlar və hər əməliyyat üçün status bölgüsü ("test" saylmır). */
+export async function actionStats(tenantId, days = 30) {
+  const d = Math.min(Math.max(Math.round(Number(days)) || 30, 1), 90);
+  const since = new Date(Date.now() - d * 86400000);
+  let rows;
+  if (mongoEnabled()) {
+    rows = await (await col()).aggregate([{ $match: { tenantId, at: { $gte: since }, status: { $ne: "test" } } }, { $group: { _id: { key: "$key", status: "$status" }, n: { $sum: 1 } } }]).toArray();
+    rows = rows.map((r) => ({ key: r._id.key, status: r._id.status, n: r.n }));
+  } else {
+    const tally = new Map();
+    for (const e of memory.get(tenantId) ?? []) if (new Date(e.at) >= since && e.status !== "test") { const k = `${e.key}|${e.status}`; tally.set(k, (tally.get(k) ?? 0) + 1); }
+    rows = [...tally].map(([k, n]) => { const [key, status] = k.split("|"); return { key, status, n }; });
+  }
+  const byKey = {};
+  let done = 0;
+  for (const r of rows) {
+    const o = (byKey[r.key] ??= {});
+    o[r.status] = (o[r.status] ?? 0) + r.n;
+    if (r.status === "done") done += r.n;
+  }
+  return { days: d, done, byKey };
+}
+
 export async function clearActionLog(tenantId) {
   if (mongoEnabled()) { await (await col()).deleteMany({ tenantId }); return; }
   memory.delete(tenantId);

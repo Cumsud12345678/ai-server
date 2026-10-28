@@ -25,7 +25,7 @@ import { validateFieldSpecs } from "./connectors/mapper.js";
 import { fetchPrivate, newIdentitySecret, preparePrivateData, privateView, validatePrivateData, verifyIdentity } from "./private/privateData.js";
 import { encryptSecret } from "./tenants/secretCrypto.js";
 import { actionsView, decideAction, newSigningSecret, prepareActions, testAction, validateActions } from "./actions/actions.js";
-import { clearActionLog, listActionLog } from "./actions/log.js";
+import { actionStats, clearActionLog, listActionLog } from "./actions/log.js";
 import { answerFromKb } from "./kb/answer.js";
 import { draftReply, validDraftInput } from "./kb/draft.js";
 import { registerKbRoutes } from "./kb/routes.js";
@@ -583,6 +583,7 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
   app.get("/v1/service/tenants/:tenantId/actions/log", serviceAuth, customerTenant, async (req, res) => {
     res.json({ entries: await listActionLog(req.tenant.tenantId, Math.min(Number(req.query.limit) || 50, 200)) });
   });
+  app.get("/v1/service/tenants/:tenantId/actions/stats", serviceAuth, customerTenant, async (req, res) => { res.json(await actionStats(req.tenant.tenantId, req.query.days)); });
   app.delete("/v1/service/tenants/:tenantId/actions/log", serviceAuth, customerTenant, async (req, res) => { await clearActionLog(req.tenant.tenantId); res.json({ ok: true }); });
 
   app.get("/v1/service/tenants/:tenantId/conversations", serviceAuth, customerTenant, async (req, res) => {
