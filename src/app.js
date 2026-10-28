@@ -31,7 +31,7 @@ import { draftReply, validDraftInput } from "./kb/draft.js";
 import { registerKbRoutes } from "./kb/routes.js";
 import { deleteTenantKb } from "./kb/store.js";
 
-const LANGS = ["az", "en", "ru"];
+const LANGS = ["az", "en", "ru", "tr"];
 const MODES = ["listings", "support", "both"];
 const SECRET_AUTH = ["header", "bearer", "query"];
 const newKey = () => `ca_live_${crypto.randomBytes(32).toString("hex")}`;
@@ -90,7 +90,7 @@ function validateConfig(body = {}, { secretAlreadyStored = false } = {}) {
 // Yalnız tanınmış profil sahələri qəbul edilir. Qaytarır: xəta mətni və ya null.
 function validateProfile(p) {
   if (!p || typeof p !== "object" || Array.isArray(p)) return "profile obyekt olmalıdır";
-  if (p.language !== undefined && !LANGS.includes(p.language)) return "profile.language az, en və ya ru olmalıdır";
+  if (p.language !== undefined && !LANGS.includes(p.language)) return "profile.language az, en, ru və ya tr olmalıdır";
   if (p.tone !== undefined && (typeof p.tone !== "string" || p.tone.length > 60)) return "profile.tone mətn olmalıdır (maksimum 60 simvol)";
   if (p.extraInstructions !== undefined && (typeof p.extraInstructions !== "string" || p.extraInstructions.length > 1000))
     return "profile.extraInstructions mətn olmalıdır (maksimum 1000 simvol)";

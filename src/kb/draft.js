@@ -5,7 +5,7 @@ import { contextBlock, generate } from "./answer.js";
 import { newMeter } from "../billing/pricing.js";
 
 const MODELS = (process.env.GEMINI_MODELS || "gemini-3.5-flash,gemini-3-flash-preview").split(",").map((s) => s.trim()).filter(Boolean);
-const LANG = { az: "Azərbaycan dili (Latın əlifbası)", en: "English", ru: "русский" };
+const LANG = { az: "Azərbaycan dili (Latın əlifbası)", en: "English", ru: "русский", tr: "Türkçe" };
 const clip = (v, n) => String(v ?? "").slice(0, n);
 
 export const validDraftInput = (b) =>

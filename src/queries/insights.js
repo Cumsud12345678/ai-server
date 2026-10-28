@@ -8,7 +8,7 @@ export const MIN_QUESTIONS = 5;
 export const MAX_ITEMS = 150;
 let ai;
 const defaultClient = () => (ai ??= new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY }));
-const LANG = { az: "Azərbaycan dilində", en: "ingilis dilində", ru: "rus dilində" };
+const LANG = { az: "Azərbaycan dilində", en: "ingilis dilində", ru: "rus dilində", tr: "türk dilində" };
 
 const promptFor = (items, language) => `Aşağıda bir saytın çat köməkçisinə verilən suallar var (nömrə. sual ×neçə dəfə). [cavabsız] = köməkçi cavab tapmayıb, [bəyənilməyib] = istifadəçi cavabı bəyənməyib.
 Tapşırıq:
@@ -57,7 +57,7 @@ export async function analyzeTopics({ items, language = "az", client = defaultCl
   }).filter((t) => t.count > 0);
   topics.sort((x, y) => y.count - x.count);
   const rest = list.map((_, i) => i).filter((i) => !used.has(i));
-  if (rest.length) topics.push({ name: language === "en" ? "Other" : language === "ru" ? "Другое" : "Digər", count: total(rest), unanswered: list.reduce((a, x, i) => a + (rest.includes(i) ? x.unanswered : 0), 0), examples: ex(rest) });
+  if (rest.length) topics.push({ name: language === "en" ? "Other" : language === "ru" ? "Другое" : language === "tr" ? "Diğer" : "Digər", count: total(rest), unanswered: list.reduce((a, x, i) => a + (rest.includes(i) ? x.unanswered : 0), 0), examples: ex(rest) });
   const gaps = (Array.isArray(parsed.gaps) ? parsed.gaps : []).slice(0, 5).map((g) => {
     const mine = ids(g?.ids, list.length);
     return { title: name(g?.title, ""), why: typeof g?.why === "string" ? g.why.trim().slice(0, 240) : "", count: weak(mine), examples: ex(mine) };

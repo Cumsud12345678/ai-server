@@ -21,10 +21,11 @@ const DEFAULT_FALLBACK = {
   az: "Bu sualın cavabını məlumatlarımda tapa bilmədim. Operatorumuzla əlaqə saxlaya bilərsiniz.",
   en: "I couldn't find the answer to this in our information. You can contact our team directly.",
   ru: "Я не нашёл ответа на этот вопрос в наших материалах. Вы можете связаться с нашей командой.",
+  tr: "Bu sorunun yanıtını bilgilerimizde bulamadım. Doğrudan ekibimizle iletişime geçebilirsiniz.",
 };
 export const fallbackText = (tenant) => tenant.profile?.fallbackMessage?.trim() || DEFAULT_FALLBACK[tenant.language] || DEFAULT_FALLBACK.az;
 
-const DEFAULT_LANG = { az: "Azərbaycan dili (Latın əlifbası)", en: "English", ru: "русский" };
+const DEFAULT_LANG = { az: "Azərbaycan dili (Latın əlifbası)", en: "English", ru: "русский", tr: "Türkçe" };
 
 function system(tenant, identity, proc = null, sid = null) {
   const p = tenant.profile ?? {};
