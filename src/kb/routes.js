@@ -3,6 +3,7 @@ import express from "express";
 import { listSources, listInbox, updateInbox, deleteInbox, deleteSource, addInbox, countChunks } from "./store.js";
 import { ingestFile, ingestText, ingestUrl, refreshSource, MAX_FILE_BYTES } from "./ingest.js";
 import { KbError } from "./extract.js";
+import { createQa, updateQa, MAX_QUESTIONS, MAX_QUESTION_CHARS, MAX_ANSWER_CHARS } from "./qa.js";
 import { maskPII } from "../queries/queries.js";
 import { fallbackText } from "./answer.js";
 
@@ -11,6 +12,7 @@ const view = (s) => ({
   id: s._id, type: s.type, name: s.name, url: s.url ?? null, status: s.status === "processing" && Date.now() - new Date(s.updatedAt) > STALE_MS ? "failed" : s.status,
   error: s.status === "processing" && Date.now() - new Date(s.updatedAt) > STALE_MS ? "Emal yarımçıq qaldı, yenidən cəhd edin" : s.error,
   chunks: s.chunks ?? 0, chars: s.chars ?? 0, pages: s.pages ?? 0, size: s.size ?? null, createdAt: s.createdAt, lastIndexedAt: s.lastIndexedAt ?? null, lastRefreshAt: s.lastRefreshAt ?? null, refreshError: s.refreshError ?? null,
+  ...(s.type === "qa" && { questions: s.questions ?? [], answer: s.answer ?? "" }),
 });
 const str = (v, max) => (typeof v === "string" ? v.trim().slice(0, max) : "");
 
@@ -32,8 +34,8 @@ export function registerKbRoutes(app, { serviceAuth, customerTenant }) {
     res.json({
       mode: t.profile?.mode ?? "listings", autoRefresh: t.profile?.kbAutoRefresh ?? "weekly", fallbackMessage: t.profile?.fallbackMessage ?? "", defaultFallback: fallbackText({ ...t, profile: { ...t.profile, fallbackMessage: "" } }),
       sources: sources.map(view),
-      limits: { sources: t.limits?.kbSources ?? (Number(process.env.KB_MAX_SOURCES) || 30), chunks: t.limits?.kbChunks ?? (Number(process.env.KB_MAX_CHUNKS) || 2500), fileBytes: MAX_FILE_BYTES },
-      totals: { sources: sources.length, chunks },
+      limits: { qa: t.limits?.kbQa ?? (Number(process.env.KB_MAX_QA) || 300), qaQuestions: MAX_QUESTIONS, qaQuestionChars: MAX_QUESTION_CHARS, qaAnswerChars: MAX_ANSWER_CHARS, sources: t.limits?.kbSources ?? (Number(process.env.KB_MAX_SOURCES) || 30), chunks: t.limits?.kbChunks ?? (Number(process.env.KB_MAX_CHUNKS) || 2500), fileBytes: MAX_FILE_BYTES },
+      totals: { sources: sources.filter((x) => x.type !== "qa").length, qa: sources.filter((x) => x.type === "qa").length, chunks },
     });
   }));
 
@@ -51,6 +53,15 @@ export function registerKbRoutes(app, { serviceAuth, customerTenant }) {
   }));
   app.post(`${base}/texts`, ...guard, wrap(async (req, res) => {
     res.status(202).json({ source: view(await ingestText(req.tenant, { title: str(req.body?.title, 160), text: typeof req.body?.text === "string" ? req.body.text : "" })) });
+  }));
+  // Sual-cavab cütləri: vektorlaşdırma qısadır, ona görə dərhal hazır qayıdır
+  app.post(`${base}/qa`, ...guard, wrap(async (req, res) => {
+    res.status(201).json({ source: view(await createQa(req.tenant, req.body)) });
+  }));
+  app.put(`${base}/qa/:id`, ...guard, wrap(async (req, res) => {
+    const s = await updateQa(req.tenant, req.params.id, req.body);
+    if (!s) return res.status(404).json({ error: "Cütlük tapılmadı" });
+    res.json({ source: view(s) });
   }));
   app.post(`${base}/sources/:id/refresh`, ...guard, wrap(async (req, res) => {
     const s = await refreshSource(req.tenant, req.params.id);

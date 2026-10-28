@@ -25,7 +25,7 @@ function background(fn) {
 const sha = (s) => createHash("sha256").update(s).digest("hex").slice(0, 32);
 
 async function guardCapacity(tenant) {
-  const sources = await listSources(tenant.tenantId);
+  const sources = (await listSources(tenant.tenantId)).filter((s) => s.type !== "qa"); // sual-cavab cütlərinin öz limiti var
   if (sources.length >= maxSources(tenant)) throw new KbError(`Ən çox ${maxSources(tenant)} mənbə əlavə edə bilərsiniz. Köhnələrini silin.`, "SOURCE_LIMIT");
   return sources;
 }

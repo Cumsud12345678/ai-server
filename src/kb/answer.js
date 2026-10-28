@@ -2,6 +2,7 @@
 import { Type } from "@google/genai";
 import { geminiClient } from "./client.js";
 import { searchKb } from "./search.js";
+import { exactAnswer } from "./qa.js";
 import { addInbox } from "./store.js";
 import { newMeter } from "../billing/pricing.js";
 import { maskPII, queryLoggingOn } from "../queries/queries.js";
@@ -92,6 +93,9 @@ const retrievalQuery = (message, history) => {
 /** Qaytarır: { answer, sources, unanswered, tokens, costUsd, listings: [] } */
 export async function answerFromKb({ tenant, message, history = [], identity = null }, client = geminiClient()) {
   const { hits, relevant, weak, empty } = await searchKb(tenant.tenantId, retrievalQuery(message, history), { k: 5, client });
+  // Sahibin yazdığı dəqiq cavab: modelsiz, sözbəsöz
+  const exact = exactAnswer(hits);
+  if (exact) return { answer: exact.answer, sources: [], unanswered: false, tokens: 0, costUsd: 0, listings: [], qa: true };
   const general = tenant.profile?.generalKnowledge !== false;
   const usable = relevant || weak; // zəif uyğunluqda da ən yaxın hissələri veririk, model özü yoxlayır
   const privateAware = Boolean(tenant.privateData?.sources?.length); // sifariş/ödəniş sualı sənədlərdə olmur: model yenə də "daxil ol" deyə bilsin

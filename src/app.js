@@ -1,3 +1,7 @@
+import { exactAnswer } from "./kb/qa.js";
+import { listChunks } from "./kb/store.js";
+import { searchKb } from "./kb/search.js";
+import { DEFAULT_IMAGE_QUESTION, describeImage, validateImage, withImageNote } from "./ai/vision.js";
 import express from "express";
 import crypto from "node:crypto";
 import { getTenantByKey, getTenant, refreshTenants } from "./tenants/tenantStore.js";
@@ -81,6 +85,7 @@ function validateProfile(p) {
   if (p.maxResults !== undefined && !Number.isFinite(Number(p.maxResults))) return "profile.maxResults rəqəm olmalıdır";
   if (p.logQueries !== undefined && typeof p.logQueries !== "boolean") return "profile.logQueries true və ya false olmalıdır";
   if (p.generalKnowledge !== undefined && typeof p.generalKnowledge !== "boolean") return "profile.generalKnowledge true və ya false olmalıdır";
+  if (p.imageSearch !== undefined && typeof p.imageSearch !== "boolean") return "profile.imageSearch true və ya false olmalıdır";
   if (p.kbAutoRefresh !== undefined && !["off", "daily", "weekly"].includes(p.kbAutoRefresh)) return "profile.kbAutoRefresh off, daily və ya weekly olmalıdır";
   return null;
 }
@@ -95,6 +100,7 @@ function mergeProfile(prev = {}, input = {}, extra = {}) {
   if (input.maxResults !== undefined) next.maxResults = Math.min(Math.max(Math.round(Number(input.maxResults)), 1), 10);
   if (input.logQueries !== undefined) next.logQueries = input.logQueries;
   if (input.generalKnowledge !== undefined) next.generalKnowledge = input.generalKnowledge;
+  if (input.imageSearch !== undefined) next.imageSearch = input.imageSearch;
   if (input.kbAutoRefresh !== undefined) next.kbAutoRefresh = input.kbAutoRefresh;
   next.language ??= "az";
   next.mode ??= "listings";
@@ -138,11 +144,13 @@ function probeProblem(r) {
   return { code: "NO_LISTINGS", error: "Elan API-sindən heç bir elan gəlmədi. Xəritələməni yoxlaya bilmək üçün saytda ən azı bir elan olmalıdır." };
 }
 
-export function createApp({ adviseFn = advise, kbFn = answerFromKb } = {}) {
+export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = describeImage } = {}) {
   const app = express();
   app.disable("x-powered-by");
   const smallJson = express.json({ limit: "100kb" });
-  app.use((req, res, next) => (req.path.endsWith("/kb/files") ? next() : smallJson(req, res, next))); // fayl yükləmə öz limitini özü qoyur
+  // Şəkilli sual yalnız portal marşrutundadır və öz (böyük) limitini qoyur; fayl yükləmə də öz limitini özü qoyur
+  const chatJson = express.json({ limit: "4mb" });
+  app.use((req, res, next) => (req.path.endsWith("/kb/files") ? next() : /^\/v1\/service\/tenants\/[^/]+\/chat$/.test(req.path) ? chatJson(req, res, next) : smallJson(req, res, next)));
 
   app.get("/health", (req, res) => res.json({ ok: true }));
 
@@ -297,9 +305,19 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb } = {}) {
   };
 
   async function chat(req, res) {
-    const { message, history, sid, identity: identityToken } = req.body ?? {};
+    const { message: rawMessage, history, sid, identity: identityToken, image: rawImage } = req.body ?? {};
+    const hasImage = rawImage !== undefined && rawImage !== null;
+    if (hasImage && !req.viaPortal) return res.status(400).json({ error: "Şəkil yalnız çat vidjeti və kanallar üzərindən qəbul olunur", code: "IMAGE_OFF" });
+    const message = hasImage && (rawMessage === undefined || rawMessage === "") ? DEFAULT_IMAGE_QUESTION : rawMessage;
     if (typeof message !== "string" || !message.trim() || message.length > 500)
       return res.status(400).json({ error: "message düzgün deyil (1-500 simvol)" });
+    let image = null;
+    if (hasImage) {
+      if (req.tenant.profile?.imageSearch !== true) return res.status(400).json({ error: "Bu hesabda şəkillə axtarış söndürülüb", code: "IMAGE_OFF" });
+      const v = validateImage(rawImage);
+      if (v.error) return res.status(400).json({ error: v.error, code: "BAD_IMAGE" });
+      image = v;
+    }
     // Yavaş sorğuda vaxtın harada getdiyini göstərmək üçün mərhələ ölçüləri (yalnız 5 san-dən uzun çəkəndə yazılır)
     const t0 = Date.now(); const marks = {}; let last = t0;
     const ORDER = ["gate", "model", "tokens", "charge", "log"];
@@ -316,9 +334,29 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb } = {}) {
       // Ziyarətçinin kimliyi yalnız saytın imzaladığı tokendən gəlir; səhv/bitmiş token = anonim (söhbət işləməyə davam edir)
       const identity = identityToken ? verifyIdentity(req.tenant, identityToken) : null;
       const support = req.tenant.profile?.mode === "support";
-      const r = support
-        ? await kbFn({ tenant: req.tenant, message: message.trim(), history: hist, identity })
-        : await adviseFn({ tenant: req.tenant, repo: await getRepo(req.tenant), message: message.trim(), history: hist, identity });
+      // Şəkil əvvəl mətnə çevrilir; sonrakı axın dəyişməz qalır
+      let vision = null;
+      if (image) {
+        vision = await visionFn({ image, caption: rawMessage ?? "" });
+        if (vision.inappropriate) {
+          await addTokens(req.tenant, vision.tokens);
+          try { await charge(req.tenant, { costUsd: vision.costUsd ?? 0, tokens: vision.tokens ?? 0 }); } catch (e) { console.error(`[billing] ${req.tenant.tenantId}:`, e.message); }
+          mark("model");
+          return res.json({ answer: "Bu şəkli oxuya bilmədim və ya axtarışa uyğun deyil. Başqa şəkil göndərin və ya sualı yazın.", listings: [], usage: { tokens: vision.tokens } });
+        }
+      }
+      const question = vision ? withImageNote(message.trim(), vision.description) : message.trim();
+      // "both" rejimində sahibin yazdığı dəqiq cavab elan axtarışından əvvəl yoxlanır (dəstək rejimində answerFromKb özü edir)
+      let qaHit = null;
+      if (!support && !vision && req.tenant.profile?.mode === "both" && (await listChunks(req.tenant.tenantId)).some((c) => c.qa)) {
+        qaHit = exactAnswer((await searchKb(req.tenant.tenantId, question, { k: 5 })).hits);
+      }
+      const r0 = qaHit
+        ? { answer: qaHit.answer, listings: [], sources: [], tokens: 0, costUsd: 0, qa: true, searched: false }
+        : support
+        ? await kbFn({ tenant: req.tenant, message: question, history: hist, identity })
+        : await adviseFn({ tenant: req.tenant, repo: await getRepo(req.tenant), message: question, history: hist, identity });
+      const r = vision ? { ...r0, tokens: (r0.tokens ?? 0) + vision.tokens, costUsd: (r0.costUsd ?? 0) + (vision.costUsd ?? 0) } : r0;
       mark("model");
       await addTokens(req.tenant, r.tokens);
       mark("tokens");
@@ -329,9 +367,9 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb } = {}) {
       // results: >0 elan, 0 axtarış aparıldı amma tapılmadı, -1 axtarışsız cavab (ümumi sual və s.), -2 operatora yönləndirildi
       const searched = r.searched ?? true;
       const results = support ? (r.unanswered ? 0 : 1) : !searched ? (r.unanswered ? -2 : -1) : (r.listings?.length ?? 0);
-      if (!req.skipQueryLog) await recordQuery(req.tenant, { message: message.trim(), results, tokens: r.tokens, cached: r.cached, costAzn: bill?.billedAzn, sid, answer: r.answer, private: r.private });
+      if (!req.skipQueryLog) await recordQuery(req.tenant, { message: `${image ? "(şəkil) " : ""}${message.trim()}`, results, tokens: r.tokens, cached: r.cached, costAzn: bill?.billedAzn, sid, answer: r.answer, private: r.private });
       mark("log"); slowLog("ok");
-      res.json({ answer: r.answer, listings: r.listings ?? [], ...(r.sources && { sources: r.sources }), ...(r.unanswered && { unanswered: true }), ...(identityToken && !identity && { identity: "invalid" }), usage: { tokens: r.tokens },
+      res.json({ answer: r.answer, listings: r.listings ?? [], ...(vision && { imageNote: vision.description.slice(0, 200) }), ...(r.sources && { sources: r.sources }), ...(r.unanswered && { unanswered: true }), ...(identityToken && !identity && { identity: "invalid" }), usage: { tokens: r.tokens },
         // Balans vəziyyəti yalnız portala verilir (müştərinin açıq API-sində görünmür)
         ...(req.viaPortal && bill && { billing: { state: bill.state, balanceAzn: bill.balanceAzn, billedAzn: bill.billedAzn, ...(bill.notify && { notify: bill.notify }) } }) });
     } catch (err) {
