@@ -1,6 +1,7 @@
 import { exactAnswer } from "./kb/qa.js";
 import { listChunks } from "./kb/store.js";
 import { searchKb } from "./kb/search.js";
+import { transcribeAudio, validateAudio } from "./ai/transcribe.js";
 import { DEFAULT_IMAGE_QUESTION, describeImage, validateImage, withImageNote } from "./ai/vision.js";
 import express from "express";
 import crypto from "node:crypto";
@@ -8,7 +9,8 @@ import { getTenantByKey, getTenant, refreshTenants } from "./tenants/tenantStore
 import { listCustomerTenants, addCustomerTenant, updateCustomerTenant, removeCustomerTenant } from "./tenants/customerStore.js";
 import { getRepo, dropRepo } from "./data/repoFactory.js";
 import { advise } from "./ai/advisor.js";
-import { recordQuery, listQueries, queryStats, clearQueries, listConversations, getConversation } from "./queries/queries.js";
+import { analyzeTopics, MIN_QUESTIONS } from "./queries/insights.js";
+import { maskPII, queryTrend, questionSample, recordQuery, listQueries, queryStats, clearQueries, listConversations, getConversation } from "./queries/queries.js";
 import { checkAndCount, addTokens, getUsage, getUsageSummary, deleteTenantUsage } from "./usage/usage.js";
 import { canSpend, charge, deleteTenantBilling } from "./billing/billing.js";
 import { registerBillingRoutes } from "./billing/routes.js";
@@ -155,7 +157,7 @@ function probeProblem(r, source) {
   return { code: "NO_LISTINGS", error: "Elan API-sindən heç bir elan gəlmədi. Xəritələməni yoxlaya bilmək üçün saytda ən azı bir elan olmalıdır." };
 }
 
-export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = describeImage } = {}) {
+export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = describeImage, transcribeFn = transcribeAudio, insightsFn = analyzeTopics } = {}) {
   const app = express();
   app.disable("x-powered-by");
   const smallJson = express.json({ limit: "100kb" });
@@ -164,7 +166,7 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
   // Fayl/feed yükləmə: mətn gövdədə gəlir (5 MB + ehtiyat)
   const feedJson = express.json({ limit: "7mb" });
   const FEED_PATHS = /^\/v1\/service\/(feed\/preview|config\/test|tenants|tenants\/[^/]+\/(config|feed\/refresh))$/;
-  app.use((req, res, next) => (req.path.endsWith("/kb/files") ? next() : /^\/v1\/service\/tenants\/[^/]+\/chat$/.test(req.path) ? chatJson(req, res, next) : FEED_PATHS.test(req.path) ? feedJson(req, res, next) : smallJson(req, res, next)));
+  app.use((req, res, next) => (req.path.endsWith("/kb/files") ? next() : /^\/v1\/service\/tenants\/[^/]+\/(chat|transcribe)$/.test(req.path) ? chatJson(req, res, next) : FEED_PATHS.test(req.path) ? feedJson(req, res, next) : smallJson(req, res, next)));
 
   app.get("/health", (req, res) => res.json({ ok: true }));
 
@@ -464,6 +466,22 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
 
   const usage = async (req, res) => res.json(await getUsage(req.tenant));
 
+  // Səsli mesaj → mətn (yalnız portal/kanallar üçün). Balans yoxlanır, xərc yazılır; sorğu limitinə sayılmır (mətn sonra /chat-a gedəndə sayılır).
+  app.post("/v1/service/tenants/:tenantId/transcribe", serviceAuth, customerTenant, async (req, res) => {
+    const v = validateAudio(req.body?.audio);
+    if (v.error) return res.status(400).json({ error: v.error, code: "BAD_AUDIO" });
+    try {
+      const funds = await canSpend(req.tenant);
+      if (!funds.ok) return res.status(402).json({ error: funds.message, code: funds.code });
+      const r = await transcribeFn({ audio: v });
+      await addTokens(req.tenant, r.tokens);
+      try { await charge(req.tenant, { costUsd: r.costUsd ?? 0, tokens: r.tokens ?? 0 }); } catch (e) { console.error(`[billing] ${req.tenant.tenantId}:`, e.message); }
+      res.json({ text: r.text, unclear: r.unclear, usage: { tokens: r.tokens } });
+    } catch (e) {
+      console.error(`[transcribe] ${req.tenant?.tenantId}:`, e.message);
+      res.status(502).json({ error: "Səs mətnə çevrilə bilmədi", code: "TRANSCRIBE_FAILED" });
+    }
+  });
   app.post("/v1/chat", auth, chat);
   app.get("/v1/listings", auth, listings);
   app.get("/v1/usage", auth, usage);
@@ -522,6 +540,38 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
   app.get("/v1/service/tenants/:tenantId/queries/stats", serviceAuth, customerTenant, async (req, res) => {
     const d = Number(req.query.days);
     res.json({ enabled: req.tenant.profile?.logQueries !== false, ...(await queryStats(req.tenant.tenantId, { days: Number.isFinite(d) && d > 0 ? Math.min(d, 90) : 30 })) });
+  });
+  // Analitika: gündəlik trend (pulsuz) və mövzu/boşluq təhlili (AI, balansdan çıxılır; nəticə 6 saat keşlənir)
+  const insightsCache = new Map();
+  const daysOf = (v) => { const d = Number(v); return Number.isFinite(d) && d > 0 ? Math.min(Math.round(d), 90) : 30; };
+  app.get("/v1/service/tenants/:tenantId/queries/trend", serviceAuth, customerTenant, async (req, res) => {
+    const days = daysOf(req.query.days);
+    res.json({ enabled: req.tenant.profile?.logQueries !== false, days, daily: await queryTrend(req.tenant.tenantId, days) });
+  });
+  app.post("/v1/service/tenants/:tenantId/insights", serviceAuth, customerTenant, async (req, res) => {
+    if (req.tenant.profile?.logQueries === false) return res.status(400).json({ error: "Sorğu jurnalı söndürülüb, təhlil üçün məlumat yoxdur", code: "LOG_OFF" });
+    const days = daysOf(req.body?.days);
+    const key = `${req.tenant.tenantId}|${days}`;
+    const hit = insightsCache.get(key);
+    if (hit && Date.now() - hit.at < 6 * 3_600_000 && !req.body?.fresh) return res.json({ ...hit.value, cached: true, analyzedAt: new Date(hit.at).toISOString() });
+    try {
+      const items = await questionSample(req.tenant.tenantId, days, 150);
+      const asked = items.reduce((a, x) => a + x.count, 0);
+      const disliked = (Array.isArray(req.body?.disliked) ? req.body.disliked : []).filter((q) => typeof q === "string" && q.trim()).slice(0, 20).map((q) => ({ text: maskPII(q.trim()).slice(0, 150), count: 1, unanswered: 0, disliked: 1 }));
+      if (asked < MIN_QUESTIONS) return res.json({ tooFew: true, asked, topics: [], gaps: [], minQuestions: MIN_QUESTIONS });
+      const funds = await canSpend(req.tenant);
+      if (!funds.ok) return res.status(402).json({ error: funds.message, code: funds.code });
+      const r = await insightsFn({ items: [...items.slice(0, 150 - disliked.length), ...disliked], language: req.tenant.profile?.language ?? "az" });
+      await addTokens(req.tenant, r.tokens);
+      try { await charge(req.tenant, { costUsd: r.costUsd ?? 0, tokens: r.tokens ?? 0 }); } catch (e) { console.error(`[billing] ${req.tenant.tenantId}:`, e.message); }
+      const value = { asked, topics: r.topics, gaps: r.gaps };
+      insightsCache.set(key, { at: Date.now(), value });
+      if (insightsCache.size > 500) insightsCache.delete(insightsCache.keys().next().value);
+      res.json({ ...value, cached: false, analyzedAt: new Date().toISOString() });
+    } catch (e) {
+      console.error(`[insights] ${req.tenant?.tenantId}:`, e.message);
+      res.status(502).json({ error: "Təhlil alınmadı, bir az sonra yenidən yoxla", code: "INSIGHTS_FAILED" });
+    }
   });
   app.delete("/v1/service/tenants/:tenantId/queries", serviceAuth, customerTenant, async (req, res) => { await clearQueries(req.tenant.tenantId); res.json({ ok: true }); });
   app.get("/v1/service/tenants/:tenantId/listings", serviceAuth, customerTenant, listings);

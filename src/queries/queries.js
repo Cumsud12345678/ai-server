@@ -196,3 +196,56 @@ export async function clearQueries(tenantId) {
   if (mongoEnabled()) { await (await col()).deleteMany({ tenantId }); return; }
   memory.delete(tenantId);
 }
+
+// ---------- Analitika: gündəlik trend və AI təhlili üçün nümunə ----------
+const TZ_H = Number(process.env.TREND_TZ_OFFSET_H ?? 4); // Azərbaycan (UTC+4): günün sərhədi yerli vaxtla
+const dayKey = (d) => new Date(new Date(d).getTime() + TZ_H * 3_600_000).toISOString().slice(0, 10);
+const isUnanswered = (d) => (d.results === 0 && !d.error) || d.results === -2;
+
+/** Gündəlik say: [{ day: "2026-10-28", total, unanswered }] (boş günlər də 0 ilə). */
+export async function queryTrend(tenantId, days = 30) {
+  const since = sinceOf(days);
+  const by = new Map();
+  if (mongoEnabled()) {
+    const rows = await (await col()).aggregate([
+      { $match: { tenantId, at: { $gte: since } } },
+      { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$at", timezone: `${TZ_H >= 0 ? "+" : "-"}${String(Math.abs(TZ_H)).padStart(2, "0")}:00` } }, total: { $sum: 1 },
+          unanswered: { $sum: { $cond: [{ $or: [{ $and: [{ $eq: ["$results", 0] }, { $eq: ["$error", false] }] }, { $eq: ["$results", -2] }] }, 1, 0] } } } },
+    ]).toArray();
+    for (const r of rows) by.set(r._id, { total: r.total, unanswered: r.unanswered });
+  } else {
+    for (const d of memoryRows(tenantId)) {
+      if (new Date(d.at) < since) continue;
+      const k = dayKey(d.at); const g = by.get(k) ?? { total: 0, unanswered: 0 };
+      g.total++; if (isUnanswered(d)) g.unanswered++; by.set(k, g);
+    }
+  }
+  const out = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const k = dayKey(Date.now() - i * 86_400_000);
+    out.push({ day: k, total: by.get(k)?.total ?? 0, unanswered: by.get(k)?.unanswered ?? 0 });
+  }
+  return out;
+}
+
+/** Eyni sual birləşir: [{ text, count, unanswered }] — ən çox soruşulanlar əvvəl, ən çox `cap` sətir. */
+export async function questionSample(tenantId, days = 30, cap = 300) {
+  const since = sinceOf(days);
+  if (mongoEnabled()) {
+    const rows = await (await col()).aggregate([
+      { $match: { tenantId, at: { $gte: since }, error: false } },
+      { $group: { _id: { $trim: { input: { $toLower: "$message" }, chars: " ?!.,;\n\t" } }, count: { $sum: 1 },
+          unanswered: { $sum: { $cond: [{ $or: [{ $eq: ["$results", 0] }, { $eq: ["$results", -2] }] }, 1, 0] } } } },
+      { $match: { _id: { $ne: "" } } }, { $sort: { count: -1, _id: 1 } }, { $limit: cap },
+    ]).toArray();
+    return rows.map((r) => ({ text: r._id, count: r.count, unanswered: r.unanswered }));
+  }
+  const m = new Map();
+  for (const d of memoryRows(tenantId)) {
+    if (new Date(d.at) < since || d.error) continue;
+    const k = norm(d.message); if (!k) continue;
+    const g = m.get(k) ?? { text: k, count: 0, unanswered: 0 };
+    g.count++; if (isUnanswered(d)) g.unanswered++; m.set(k, g);
+  }
+  return [...m.values()].sort((a, b) => b.count - a.count || (a.text < b.text ? -1 : 1)).slice(0, cap);
+}
