@@ -9,7 +9,8 @@ import { getTenantByKey, getTenant, refreshTenants } from "./tenants/tenantStore
 import { listCustomerTenants, addCustomerTenant, updateCustomerTenant, removeCustomerTenant } from "./tenants/customerStore.js";
 import { getRepo, dropRepo } from "./data/repoFactory.js";
 import { advise } from "./ai/advisor.js";
-import { recordQuery, listQueries, queryStats, clearQueries, listConversations, getConversation } from "./queries/queries.js";
+import { analyzeTopics, MIN_QUESTIONS } from "./queries/insights.js";
+import { maskPII, queryTrend, questionSample, recordQuery, listQueries, queryStats, clearQueries, listConversations, getConversation } from "./queries/queries.js";
 import { checkAndCount, addTokens, getUsage, getUsageSummary, deleteTenantUsage } from "./usage/usage.js";
 import { canSpend, charge, deleteTenantBilling } from "./billing/billing.js";
 import { registerBillingRoutes } from "./billing/routes.js";
@@ -23,6 +24,8 @@ import { deleteFeed, putFeed } from "./connectors/feedStore.js";
 import { validateFieldSpecs } from "./connectors/mapper.js";
 import { fetchPrivate, newIdentitySecret, preparePrivateData, privateView, validatePrivateData, verifyIdentity } from "./private/privateData.js";
 import { encryptSecret } from "./tenants/secretCrypto.js";
+import { actionsView, decideAction, newSigningSecret, prepareActions, testAction, validateActions } from "./actions/actions.js";
+import { clearActionLog, listActionLog } from "./actions/log.js";
 import { answerFromKb } from "./kb/answer.js";
 import { registerKbRoutes } from "./kb/routes.js";
 import { deleteTenantKb } from "./kb/store.js";
@@ -156,7 +159,7 @@ function probeProblem(r, source) {
   return { code: "NO_LISTINGS", error: "Elan API-sindən heç bir elan gəlmədi. Xəritələməni yoxlaya bilmək üçün saytda ən azı bir elan olmalıdır." };
 }
 
-export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = describeImage, transcribeFn = transcribeAudio } = {}) {
+export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = describeImage, transcribeFn = transcribeAudio, insightsFn = analyzeTopics } = {}) {
   const app = express();
   app.disable("x-powered-by");
   const smallJson = express.json({ limit: "100kb" });
@@ -308,6 +311,7 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
     dropRepo(id);
     await deleteTenantUsage(id);
     await clearQueries(id);
+    await clearActionLog(id);
     await deleteTenantKb(id);
     await deleteFeed(id);
     await deleteTenantBilling(id);
@@ -402,6 +406,9 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
       // Ziyarətçinin kimliyi yalnız saytın imzaladığı tokendən gəlir; səhv/bitmiş token = anonim (söhbət işləməyə davam edir)
       const identity = identityToken ? verifyIdentity(req.tenant, identityToken) : null;
       const support = req.tenant.profile?.mode === "support";
+      // Əməliyyat təklifi yalnız portal üzərindən (təsdiq də orada olur) və yalnız söhbət ID-si varsa
+      const cleanSid = typeof sid === "string" && /^[\w.:-]{6,100}$/.test(sid) ? sid : null;
+      const actionCtx = req.viaPortal && cleanSid ? { sid: cleanSid, channel: ["widget", "telegram", "whatsapp"].includes(req.body?.channel) ? req.body.channel : "widget" } : {};
       // Şəkil əvvəl mətnə çevrilir; sonrakı axın dəyişməz qalır
       let vision = null;
       if (image) {
@@ -422,8 +429,8 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
       const r0 = qaHit
         ? { answer: qaHit.answer, listings: [], sources: [], tokens: 0, costUsd: 0, qa: true, searched: false }
         : support
-        ? await kbFn({ tenant: req.tenant, message: question, history: hist, identity })
-        : await adviseFn({ tenant: req.tenant, repo: await getRepo(req.tenant), message: question, history: hist, identity, live: Boolean(req.viaPortal && req.body?.live === true) });
+        ? await kbFn({ tenant: req.tenant, message: question, history: hist, identity, ...actionCtx })
+        : await adviseFn({ tenant: req.tenant, repo: await getRepo(req.tenant), message: question, history: hist, identity, ...actionCtx, live: Boolean(req.viaPortal && req.body?.live === true) });
       const r = vision ? { ...r0, tokens: (r0.tokens ?? 0) + vision.tokens, costUsd: (r0.costUsd ?? 0) + (vision.costUsd ?? 0) } : r0;
       mark("model");
       await addTokens(req.tenant, r.tokens);
@@ -437,7 +444,7 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
       const results = support ? (r.unanswered ? 0 : 1) : !searched ? (r.unanswered ? -2 : -1) : (r.listings?.length ?? 0);
       if (!req.skipQueryLog) await recordQuery(req.tenant, { message: `${image ? "(şəkil) " : ""}${message.trim()}`, results, tokens: r.tokens, cached: r.cached, costAzn: bill?.billedAzn, sid, answer: r.answer, private: r.private });
       mark("log"); slowLog("ok");
-      res.json({ answer: r.answer, listings: r.listings ?? [], ...(vision && { imageNote: vision.description.slice(0, 200) }), ...(r.sources && { sources: r.sources }), ...(r.unanswered && { unanswered: true }), ...(r.handoff && { handoff: true }), ...(identityToken && !identity && { identity: "invalid" }), usage: { tokens: r.tokens },
+      res.json({ answer: r.answer, listings: r.listings ?? [], ...(vision && { imageNote: vision.description.slice(0, 200) }), ...(r.sources && { sources: r.sources }), ...(r.unanswered && { unanswered: true }), ...(r.handoff && { handoff: true }), ...(r.confirm && { confirm: r.confirm }), ...(identityToken && !identity && { identity: "invalid" }), usage: { tokens: r.tokens },
         // Balans vəziyyəti yalnız portala verilir (müştərinin açıq API-sində görünmür)
         ...(req.viaPortal && bill && { billing: { state: bill.state, balanceAzn: bill.balanceAzn, billedAzn: bill.billedAzn, ...(bill.notify && { notify: bill.notify }) } }) });
     } catch (err) {
@@ -527,6 +534,56 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
     catch (e) { res.status(422).json({ ok: false, error: e.message, code: e.code ?? "TEST_FAILED" }); }
   });
 
+  // ---------- Əməliyyatlar (yazma: ləğv et, bilet yarat, rezerv et...) ----------
+  app.get("/v1/service/tenants/:tenantId/actions", serviceAuth, customerTenant, (req, res) => res.json(actionsView(req.tenant)));
+  app.put("/v1/service/tenants/:tenantId/actions", serviceAuth, customerTenant, async (req, res) => {
+    const { apiSecret, ...input } = req.body ?? {};
+    const old = req.tenant.actions;
+    if (apiSecret !== undefined && (typeof apiSecret !== "string" || apiSecret.length > 500)) return res.status(400).json({ error: "apiSecret düzgün deyil" });
+    const error = validateActions(input, { secretAlreadyStored: Boolean(old?.auth?.encryptedValue), apiSecret });
+    if (error) return res.status(400).json({ error });
+    const next = prepareActions(input, apiSecret, old);
+    let signing = null;
+    if (!next.signingSecretEnc) { signing = newSigningSecret(); next.signingSecretEnc = encryptSecret(signing); next.signingCreatedAt = new Date().toISOString(); }
+    await updateCustomerTenant(req.tenant.tenantId, (t) => ({ ...t, actions: next }));
+    refreshTenants();
+    res.json({ ...actionsView({ ...req.tenant, actions: next }), ...(signing && { signingSecret: signing }) });
+  });
+  app.delete("/v1/service/tenants/:tenantId/actions", serviceAuth, customerTenant, async (req, res) => {
+    await updateCustomerTenant(req.tenant.tenantId, (t) => { const { actions: _a, ...rest } = t; return rest; });
+    refreshTenants();
+    res.json({ ok: true });
+  });
+  app.post("/v1/service/tenants/:tenantId/actions/signing-secret", serviceAuth, customerTenant, async (req, res) => {
+    if (!req.tenant.actions) return res.status(400).json({ error: "Əvvəlcə əməliyyatları saxlayın", code: "NO_ACTIONS" });
+    const secret = newSigningSecret();
+    await updateCustomerTenant(req.tenant.tenantId, (t) => ({ ...t, actions: { ...t.actions, signingSecretEnc: encryptSecret(secret), signingCreatedAt: new Date().toISOString() } }));
+    refreshTenants();
+    res.status(201).json({ signingSecret: secret });
+  });
+  app.post("/v1/service/tenants/:tenantId/actions/test", serviceAuth, customerTenant, async (req, res) => {
+    const { key, params, send, userId } = req.body ?? {};
+    if (typeof key !== "string" || !/^[a-z][a-z0-9_]{1,30}$/.test(key)) return res.status(400).json({ error: "key düzgün deyil" });
+    if (params !== undefined && (typeof params !== "object" || params === null || Array.isArray(params))) return res.status(400).json({ error: "params obyekt olmalıdır" });
+    if (userId !== undefined && (typeof userId !== "string" || !/^[\w.@:+-]{1,100}$/.test(userId))) return res.status(400).json({ error: "userId düzgün deyil" });
+    const r = await testAction(req.tenant, { key, params: params ?? {}, send: send === true, ...(userId && { subject: userId }) });
+    if (r.error) return res.status(400).json({ error: r.error });
+    res.json(r);
+  });
+  // İstifadəçinin qərarı: yalnız portal (identity token + sid onda yoxlanılıb) çağırır
+  app.post("/v1/service/tenants/:tenantId/actions/confirm", serviceAuth, customerTenant, async (req, res) => {
+    req.viaPortal = true; // /v1/service/* yalnız portalın xidmət tokeni ilə açılır
+    if (!req.viaPortal) return res.status(403).json({ error: "Bu əməliyyat yalnız çat vidjeti və kanallar üzərindən təsdiqlənir", code: "PORTAL_ONLY" });
+    const { id, decision, sid, identity: identityToken } = req.body ?? {};
+    if (typeof id !== "string" || !/^[0-9a-f]{32}$/.test(id) || !["confirm", "cancel"].includes(decision) || typeof sid !== "string" || sid.length > 100) return res.status(400).json({ error: "id, decision və sid düzgün deyil" });
+    const identity = typeof identityToken === "string" && identityToken ? verifyIdentity(req.tenant, identityToken) : null;
+    res.json(await decideAction(req.tenant, { id, decision, sid, identity }));
+  });
+  app.get("/v1/service/tenants/:tenantId/actions/log", serviceAuth, customerTenant, async (req, res) => {
+    res.json({ entries: await listActionLog(req.tenant.tenantId, Math.min(Number(req.query.limit) || 50, 200)) });
+  });
+  app.delete("/v1/service/tenants/:tenantId/actions/log", serviceAuth, customerTenant, async (req, res) => { await clearActionLog(req.tenant.tenantId); res.json({ ok: true }); });
+
   app.get("/v1/service/tenants/:tenantId/conversations", serviceAuth, customerTenant, async (req, res) => {
     const n = (v, d) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : d);
     res.json({ enabled: req.tenant.profile?.logQueries !== false, ...(await listConversations(req.tenant.tenantId, { before: String(req.query.before ?? "").slice(0, 40), limit: n(req.query.limit, 30), days: Math.min(n(req.query.days, 30), 90) })) });
@@ -539,6 +596,38 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
   app.get("/v1/service/tenants/:tenantId/queries/stats", serviceAuth, customerTenant, async (req, res) => {
     const d = Number(req.query.days);
     res.json({ enabled: req.tenant.profile?.logQueries !== false, ...(await queryStats(req.tenant.tenantId, { days: Number.isFinite(d) && d > 0 ? Math.min(d, 90) : 30 })) });
+  });
+  // Analitika: gündəlik trend (pulsuz) və mövzu/boşluq təhlili (AI, balansdan çıxılır; nəticə 6 saat keşlənir)
+  const insightsCache = new Map();
+  const daysOf = (v) => { const d = Number(v); return Number.isFinite(d) && d > 0 ? Math.min(Math.round(d), 90) : 30; };
+  app.get("/v1/service/tenants/:tenantId/queries/trend", serviceAuth, customerTenant, async (req, res) => {
+    const days = daysOf(req.query.days);
+    res.json({ enabled: req.tenant.profile?.logQueries !== false, days, daily: await queryTrend(req.tenant.tenantId, days) });
+  });
+  app.post("/v1/service/tenants/:tenantId/insights", serviceAuth, customerTenant, async (req, res) => {
+    if (req.tenant.profile?.logQueries === false) return res.status(400).json({ error: "Sorğu jurnalı söndürülüb, təhlil üçün məlumat yoxdur", code: "LOG_OFF" });
+    const days = daysOf(req.body?.days);
+    const key = `${req.tenant.tenantId}|${days}`;
+    const hit = insightsCache.get(key);
+    if (hit && Date.now() - hit.at < 6 * 3_600_000 && !req.body?.fresh) return res.json({ ...hit.value, cached: true, analyzedAt: new Date(hit.at).toISOString() });
+    try {
+      const items = await questionSample(req.tenant.tenantId, days, 150);
+      const asked = items.reduce((a, x) => a + x.count, 0);
+      const disliked = (Array.isArray(req.body?.disliked) ? req.body.disliked : []).filter((q) => typeof q === "string" && q.trim()).slice(0, 20).map((q) => ({ text: maskPII(q.trim()).slice(0, 150), count: 1, unanswered: 0, disliked: 1 }));
+      if (asked < MIN_QUESTIONS) return res.json({ tooFew: true, asked, topics: [], gaps: [], minQuestions: MIN_QUESTIONS });
+      const funds = await canSpend(req.tenant);
+      if (!funds.ok) return res.status(402).json({ error: funds.message, code: funds.code });
+      const r = await insightsFn({ items: [...items.slice(0, 150 - disliked.length), ...disliked], language: req.tenant.profile?.language ?? "az" });
+      await addTokens(req.tenant, r.tokens);
+      try { await charge(req.tenant, { costUsd: r.costUsd ?? 0, tokens: r.tokens ?? 0 }); } catch (e) { console.error(`[billing] ${req.tenant.tenantId}:`, e.message); }
+      const value = { asked, topics: r.topics, gaps: r.gaps };
+      insightsCache.set(key, { at: Date.now(), value });
+      if (insightsCache.size > 500) insightsCache.delete(insightsCache.keys().next().value);
+      res.json({ ...value, cached: false, analyzedAt: new Date().toISOString() });
+    } catch (e) {
+      console.error(`[insights] ${req.tenant?.tenantId}:`, e.message);
+      res.status(502).json({ error: "Təhlil alınmadı, bir az sonra yenidən yoxla", code: "INSIGHTS_FAILED" });
+    }
   });
   app.delete("/v1/service/tenants/:tenantId/queries", serviceAuth, customerTenant, async (req, res) => { await clearQueries(req.tenant.tenantId); res.json({ ok: true }); });
   app.get("/v1/service/tenants/:tenantId/listings", serviceAuth, customerTenant, listings);

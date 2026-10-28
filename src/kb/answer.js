@@ -7,6 +7,7 @@ import { procedureHit, procedurePrompt } from "./proc.js";
 import { addInbox } from "./store.js";
 import { newMeter } from "../billing/pricing.js";
 import { maskPII, queryLoggingOn } from "../queries/queries.js";
+import { actionDeclarations, actionsPrompt, isActionTool, runActionTool } from "../actions/actions.js";
 import { privateDeclarations, privatePrompt, privateToolNames, runPrivateTool } from "../private/privateData.js";
 
 const MODELS = (process.env.GEMINI_MODELS || "gemini-3.5-flash,gemini-3-flash-preview").split(",").map((s) => s.trim()).filter(Boolean);
@@ -25,7 +26,7 @@ export const fallbackText = (tenant) => tenant.profile?.fallbackMessage?.trim() 
 
 const DEFAULT_LANG = { az: "Azərbaycan dili (Latın əlifbası)", en: "English", ru: "русский" };
 
-function system(tenant, identity, proc = null) {
+function system(tenant, identity, proc = null, sid = null) {
   const p = tenant.profile ?? {};
   return `Sən ${p.businessName ? `"${p.businessName}" şirkətinin` : "şirkətin"} dəstək operatorusan (ünvan: ${p.domain ?? "-"}). Şirkətin fəaliyyət sahəsini yalnız KONTEKSTdən öyrən; adından və ya domen adından təxmin etmə.
 QAYDALAR:
@@ -40,7 +41,7 @@ ${p.generalKnowledge === false
 7. İstifadəçi operatorla, canlı insanla və ya menecerlə danışmaq istəyirsə: operatora birbaşa qoşa bilmədiyini, amma əlaqə formasında telefon və ya email qoysa operatorun onunla əlaqə saxlayacağını yaz və [[NO_ANSWER]] əlavə et.
 8. Elan və ya məhsul axtarışı, göstərmək və ya satış təklif etmə: bu rejimdə yalnız suallara cavab verirsən. Özünü "məsləhətçi" və ya "elan köməkçisi" kimi təqdim etmə.
 9. Cavabdan sonra ayrıca sətirdə istifadə etdiyin kontekst nömrələrini yaz, məsələn: [[S:1,3]]. NO_ANSWER halında bunu yazma.
-Ton: ${p.tone ?? "dostcasına, peşəkar"}.${p.extraInstructions ? "\n" + p.extraInstructions : ""}${privatePrompt(tenant, identity)}${procedurePrompt(proc)}`;
+Ton: ${p.tone ?? "dostcasına, peşəkar"}.${p.extraInstructions ? "\n" + p.extraInstructions : ""}${privatePrompt(tenant, identity)}${sid ? actionsPrompt(tenant, identity) : ""}${procedurePrompt(proc)}`;
 }
 
 const header = (c) => [c.title, c.heading].filter(Boolean).join(" — ");
@@ -92,7 +93,7 @@ const retrievalQuery = (message, history) => {
 };
 
 /** Qaytarır: { answer, sources, unanswered, tokens, costUsd, listings: [] } */
-export async function answerFromKb({ tenant, message, history = [], identity = null }, client = geminiClient()) {
+export async function answerFromKb({ tenant, message, history = [], identity = null, sid = null, channel = null }, client = geminiClient()) {
   const found = await searchKb(tenant.tenantId, retrievalQuery(message, history), { k: 5, client });
   const { relevant, weak, empty } = found;
   const proc = procedureHit(found.hits);
@@ -115,23 +116,23 @@ export async function answerFromKb({ tenant, message, history = [], identity = n
   let lastErr;
   for (const model of MODELS) {
     try {
-      const ptools = identity ? privateDeclarations(tenant) : [];
+      const ptools = [...(identity ? privateDeclarations(tenant) : []), ...actionDeclarations(tenant, { identity, sid })];
       const pctx = {};
       const convo = [...contents];
       let res;
       for (let i = 0; ; i++) {
-        res = await generate(client, { model, contents: convo, config: { systemInstruction: system(tenant, identity, proc), ...(ptools.length && { tools: [{ functionDeclarations: ptools }] }), ...(THINKING_BUDGET !== null && { thinkingConfig: { thinkingBudget: THINKING_BUDGET } }) } });
+        res = await generate(client, { model, contents: convo, config: { systemInstruction: system(tenant, identity, proc, sid), ...(ptools.length && { tools: [{ functionDeclarations: ptools }] }), ...(THINKING_BUDGET !== null && { thinkingConfig: { thinkingBudget: THINKING_BUDGET } }) } });
         meter.add(model, res.usageMetadata);
         const calls = ptools.length ? res.functionCalls : null;
         if (!calls?.length || i >= 3) break;
         convo.push(res.candidates[0].content);
         const parts = [];
-        for (const call of calls) parts.push({ functionResponse: { name: call.name, response: { result: privateToolNames.has(call.name) ? await runPrivateTool(tenant, identity, call.name, call.args, pctx) : { error: "Naməlum alət" } } } });
+        for (const call of calls) parts.push({ functionResponse: { name: call.name, response: { result: isActionTool(call.name) ? runActionTool(tenant, identity, call.name, call.args, pctx, { sid, channel }) : privateToolNames.has(call.name) ? await runPrivateTool(tenant, identity, call.name, call.args, pctx) : { error: "Naməlum alət" } } } });
         convo.push({ role: "user", parts });
       }
       const tokens = meter.tokens, costUsd = meter.costUsd;
       const { answer, noAnswer, used } = parseMarkers(res.text ?? "");
-      const priv = pctx.private ? { private: true } : {};
+      const priv = { ...(pctx.private && { private: true }), ...(pctx.pendingAction && { confirm: pctx.pendingAction }) };
       if (!answer || (noAnswer && !answer)) { await logUnanswered(tenant, message, "empty_answer"); return { answer: fallbackText(tenant), sources: [], unanswered: true, tokens, costUsd, listings: [], ...priv }; }
       if (noAnswer) await logUnanswered(tenant, message, "model_unsure");
       return { answer, sources: noAnswer || !usable ? [] : sourcesOf(hits, used), unanswered: noAnswer, tokens, costUsd, listings: [], ...priv };
