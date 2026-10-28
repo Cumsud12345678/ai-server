@@ -313,3 +313,20 @@ test("operatora bağla: model request_operator çağırır → cavabda unanswere
   assert.equal(out.unanswered, true);
   assert.match(out.answer, /operator/);
 });
+
+test("live rejimi: handoff bayrağı qayıdır və model operatorun qoşulduğunu deyir; live olmadan not formaya yönəldir", async () => {
+  const tenant = { tenantId: "op-live", language: "az", profile: { mode: "both", businessName: "B" }, limits: {} };
+  const { advise } = await import("../src/ai/advisor.js");
+  for (const live of [true, false]) {
+    let step = 0, note = "";
+    const client = { models: { embedContent: fakeGemini.models.embedContent, generateContent: async (p) => {
+      if (step++ === 0) return { functionCalls: [{ name: "request_operator", args: {} }], candidates: [{ content: { role: "model", parts: [{ functionCall: { name: "request_operator", args: {} } }] } }], usageMetadata: { totalTokenCount: 5 } };
+      note = JSON.stringify(p.contents.at(-1));
+      return { text: "ok", usageMetadata: { totalTokenCount: 5 } };
+    } } };
+    const out = await advise({ tenant, repo: { schema: undefined, search: async () => [] }, message: "operatora qoş", live }, client);
+    assert.equal(out.handoff, true);
+    assert.equal(/canlı operatora ötürülür/.test(note), live);
+    assert.equal(/əlaqə formu/.test(note), !live);
+  }
+});
