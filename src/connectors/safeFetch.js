@@ -1,26 +1,14 @@
 // Müştərinin API-sini TƏHLÜKƏSİZ çağırır (SSRF qoruması, timeout, ölçü limiti, redirect qadağası)
 import dns from "node:dns/promises";
 import net from "node:net";
+import { isPrivateIp } from "./ipCheck.js";
+import { guardedFetch, isPrivateIpError } from "./safeDispatcher.js";
 
 export class ConnectorError extends Error {
   constructor(message, code) { super(message); this.code = code; }
 }
 
-function ipv4Private(ip) {
-  const [a, b] = ip.split(".").map(Number);
-  return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || a >= 224;
-}
-export function isPrivateIp(ip) {
-  if (net.isIPv4(ip)) return ipv4Private(ip);
-  const l = ip.toLowerCase();
-  if (l === "::1" || l === "::") return true;
-  if (l.startsWith("::ffff:")) {
-    const m = l.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-    return m ? ipv4Private(m[1]) : true; // hex formasını ehtiyat üçün blokla
-  }
-  return /^f[cd]/.test(l) || /^fe[89ab]/.test(l);
-}
+export { isPrivateIp };
 
 // Yalnız https və xarici (public) ünvanlar. Lokal inkişaf üçün ALLOW_LOCAL_CONNECTORS=1.
 export async function assertSafeUrl(urlStr) {
@@ -42,7 +30,7 @@ export async function assertSafeUrl(urlStr) {
 export async function safeFetchJson(urlStr, { method = "GET", headers = {}, body, timeoutMs = 5000, maxBytes = 1_000_000 } = {}) {
   const url = await assertSafeUrl(urlStr);
   try {
-    const res = await fetch(url, {
+    const res = await guardedFetch(url, {
       method, body, redirect: "manual", signal: AbortSignal.timeout(timeoutMs),
       headers: { accept: "application/json", ...headers },
     });
@@ -62,6 +50,7 @@ export async function safeFetchJson(urlStr, { method = "GET", headers = {}, body
     catch { throw new ConnectorError("Müştəri cavabı JSON deyil", "BAD_JSON"); }
   } catch (e) {
     if (e instanceof ConnectorError) throw e;
+    if (isPrivateIpError(e)) throw new ConnectorError("Daxili şəbəkə ünvanlarına icazə yoxdur", "UNSAFE_URL");
     if (e.name === "TimeoutError" || e.name === "AbortError") throw new ConnectorError("Müştəri API-si vaxtında cavab vermədi", "TIMEOUT");
     throw new ConnectorError(`Müştəri API-sinə qoşulmaq alınmadı (${e.cause?.code ?? e.message})`, "NETWORK");
   }
@@ -73,7 +62,7 @@ export async function safeFetchText(urlStr, { timeoutMs = 20_000, maxBytes = 5_0
   try {
     for (let hop = 0; hop <= redirects; hop++) {
       const url = await assertSafeUrl(current);
-      const res = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(timeoutMs), headers: { accept: "text/csv, application/json, application/xml, text/xml, */*", "user-agent": "ChatbotFeedBot/1.0" } });
+      const res = await guardedFetch(url, { redirect: "manual", signal: AbortSignal.timeout(timeoutMs), headers: { accept: "text/csv, application/json, application/xml, text/xml, */*", "user-agent": "ChatbotFeedBot/1.0" } });
       if (res.status >= 300 && res.status < 400 && res.headers.get("location")) { current = new URL(res.headers.get("location"), url).toString(); continue; }
       if (!res.ok) throw new ConnectorError(`Link ${res.status} qaytardı`, `HTTP_${res.status}`);
       const reader = res.body.getReader();
@@ -90,6 +79,7 @@ export async function safeFetchText(urlStr, { timeoutMs = 20_000, maxBytes = 5_0
     throw new ConnectorError("Çox sayda yönləndirmə", "REDIRECT");
   } catch (e) {
     if (e instanceof ConnectorError) throw e;
+    if (isPrivateIpError(e)) throw new ConnectorError("Daxili şəbəkə ünvanlarına icazə yoxdur", "UNSAFE_URL");
     if (e.name === "TimeoutError" || e.name === "AbortError") throw new ConnectorError("Link vaxtında cavab vermədi", "TIMEOUT");
     throw new ConnectorError(`Linkə qoşulmaq alınmadı (${e.cause?.code ?? e.message})`, "NETWORK");
   }

@@ -1,5 +1,6 @@
 // Sayt oxuma: bir səhifə, sitemap və ya linklərlə bütün sayt. SSRF qoruması safeFetch ilə eynidir (hər yönləndirmə yenidən yoxlanır).
 import { assertSafeUrl, ConnectorError } from "../connectors/safeFetch.js";
+import { guardedFetch, isPrivateIpError } from "../connectors/safeDispatcher.js";
 import { extractHtml, extractFile, KbError } from "./extract.js";
 
 const UA = "SupportBotCrawler/1.0 (+bilik-bazasi)";
@@ -25,9 +26,10 @@ export async function fetchSafe(urlStr, { timeoutMs = 10_000, maxBytes = MAX_BYT
     const url = await assertSafeUrl(current);
     let res;
     try {
-      res = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(timeoutMs), headers: { "user-agent": UA, accept: "text/html,application/pdf,text/plain,application/xml;q=0.9,*/*;q=0.5", "accept-language": "az,en;q=0.8,ru;q=0.7" } });
+      res = await guardedFetch(url, { redirect: "manual", signal: AbortSignal.timeout(timeoutMs), headers: { "user-agent": UA, accept: "text/html,application/pdf,text/plain,application/xml;q=0.9,*/*;q=0.5", "accept-language": "az,en;q=0.8,ru;q=0.7" } });
     } catch (e) {
       if (e instanceof ConnectorError) throw e;
+      if (isPrivateIpError(e)) throw new ConnectorError("Daxili şəbəkə ünvanlarına icazə yoxdur", "UNSAFE_URL");
       if (e.name === "TimeoutError" || e.name === "AbortError") throw new KbError("Sayt vaxtında cavab vermədi", "TIMEOUT");
       throw new KbError(`Sayta qoşulmaq alınmadı (${e.cause?.code ?? e.message})`, "NETWORK");
     }
