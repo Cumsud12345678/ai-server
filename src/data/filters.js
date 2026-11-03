@@ -85,12 +85,15 @@ export function compileSchema(filters = {}, sortFields = [], { strict = false } 
     const description = rule.description ?? preset?.description;
     if (!text(description, 200) || String(description).trim().length < 3) return { error: `${where}.description tələb olunur (AI filtri bununla başa düşür; 3-200 simvol)` };
 
+    // multiply: rəqəm müştərinin API-sinə vurularaq gedir (məs. WooCommerce qiyməti qəpiklə istəyir: 150 AZN -> 15000, multiply 100)
+    if (rule.multiply !== undefined && (!["number", "range"].includes(kind) || typeof rule.multiply !== "number" || !(rule.multiply > 0) || rule.multiply > 1e6))
+      return { error: `${where}.multiply yalnız number/range tipində müsbət rəqəm ola bilər (məs. 100)` };
     if (kind === "range") {
       if (rule.minParam === undefined && rule.maxParam === undefined) return { error: `${where}: minParam və ya maxParam tələb olunur` };
       for (const [side, p] of [["Min", rule.minParam], ["Max", rule.maxParam]]) {
         if (p === undefined) continue;
         if (!cleanParam(p)) return { error: `${where}.${side.toLowerCase()}Param düzgün deyil` };
-        const e = add({ name: `${key}${side}`, kind: "number", description: `${description.trim()} (${side === "Min" ? "ən az" : "ən çox"})`, param: p }, where);
+        const e = add({ name: `${key}${side}`, kind: "number", description: `${description.trim()} (${side === "Min" ? "ən az" : "ən çox"})`, param: p, ...(rule.multiply && { multiply: rule.multiply }) }, where);
         if (e) return { error: e };
       }
       continue;
@@ -114,6 +117,7 @@ export function compileSchema(filters = {}, sortFields = [], { strict = false } 
     if (v.values) a.values = v.values;
     if (rule.valueFrom) a.valueFrom = rule.valueFrom;
     if (rule.valueMap) a.valueMap = rule.valueMap;
+    if (rule.multiply) a.multiply = rule.multiply;
     if (kind === "multi") {
       if (rule.separator !== undefined && !text(rule.separator, 3)) return { error: `${where}.separator düzgün deyil` };
       a.separator = rule.separator ?? ",";

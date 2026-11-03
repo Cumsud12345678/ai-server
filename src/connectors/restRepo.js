@@ -100,6 +100,7 @@ export function createRestRepo(tenant) {
         out = Array.isArray(v) ? v.map(one).filter((x) => x !== undefined) : one(v);
         if (out === undefined || (Array.isArray(out) && !out.length)) continue;
       }
+      if (a.multiply && typeof out === "number") out = Math.round(out * a.multiply);
       if (Array.isArray(out) && a.format !== "array") out = out.join(a.separator ?? ",");
       params[a.param] = out;
     }
