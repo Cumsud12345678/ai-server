@@ -1,37 +1,54 @@
-// Gemini istifadəsinin REAL xərci (dollar) və müştəriyə yazılan məbləğ (manat).
-// Qiymətlər env-dən dəyişdirilə bilər: GEMINI_PRICES='{"gemini-3.5-flash":{"in":1.5,"out":9,"cachedIn":0.15}}' (1 milyon token üçün dollar).
-// DİQQƏT: aşağıdakı defoltlar yayımlanmış qiymətlərə görə təxminidir; Google qiymət dəyişsə env-dən yenilə.
-
-// Claude Haiku 5.5 tarifi (1M token: giriş 0.10, çıxış 0.50, keş oxuma 0.01 USD): bütün modellərə tətbiq olunur.
-// Real Gemini qiymətlərinə qayıtmaq üçün GEMINI_PRICES env-i ilə modeli göstər (məs. gemini-3.5-flash: in 1.5, out 9, cachedIn 0.15).
-const HAIKU = { in: 0.1, out: 0.5, cachedIn: 0.01 };
+// AI istifadəsinin REAL xərci (dollar) və müştəriyə yazılan məbləğ (manat). Claude və Gemini birlikdə.
+// Qiymətlər 1 milyon token üçün dollardır. Env ilə dəyişdirmək olar (AI_PRICES və ya köhnə adı GEMINI_PRICES):
+//   AI_PRICES='{"gemini-3.5-flash-lite":{"in":0.3,"out":2.5,"cachedIn":0.03}}'
+// DİQQƏT: defoltlar yayımlanmış qiymətlərə görədir; provayder qiyməti dəyişsə env-dən yenilə.
+// Naməlum model "*" qiyməti ilə (ən bahalısı) hesablanır: səhv model adı səni zərərə salmasın.
+//
+// tier: prompt (keş daxil) "over" tokendən çoxdursa BÜTÜN sətirlər (çıxış da) yüksək qiymətlə hesablanır.
+// Claude Haiku 5.5-də bu hədd 100 000 tokendir.
 const DEFAULT_PRICES = {
-  "gemini-3.5-flash": HAIKU,
-  "gemini-3-flash-preview": HAIKU,
-  "gemini-3.5-flash-lite": HAIKU,
-  "*": HAIKU,
+  "claude-haiku-5-5": { in: 0.1, out: 0.5, cachedIn: 0.01, cacheWrite: 0.125, tier: { over: 100_000, in: 0.5, out: 2.5, cachedIn: 0.05, cacheWrite: 0.625 } },
+  "claude-haiku-4-5": { in: 1, out: 5, cachedIn: 0.1, cacheWrite: 1.25 },
+  "gemini-3.5-flash-lite": { in: 0.3, out: 2.5, cachedIn: 0.03 },
+  "gemini-3.5-flash": { in: 1.5, out: 9, cachedIn: 0.15 },
+  "gemini-3-flash-preview": { in: 0.5, out: 3, cachedIn: 0.05 },
+  "gemini-embedding-001": { in: 0.15, out: 0 },
+  "*": { in: 1.5, out: 9, cachedIn: 0.15 },
 };
 
-function prices() {
-  try { return { ...DEFAULT_PRICES, ...(process.env.GEMINI_PRICES ? JSON.parse(process.env.GEMINI_PRICES) : {}) }; }
-  catch { console.warn("[billing] GEMINI_PRICES düzgün JSON deyil, defolt qiymətlər işləyir"); return DEFAULT_PRICES; }
+function envPrices() {
+  const raw = process.env.AI_PRICES || process.env.GEMINI_PRICES;
+  if (!raw) return {};
+  try { return JSON.parse(raw); }
+  catch { console.warn("[billing] AI_PRICES düzgün JSON deyil, defolt qiymətlər işləyir"); return {}; }
 }
+const prices = () => ({ ...DEFAULT_PRICES, ...envPrices() });
 
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
 /**
- * Bir Gemini çağırışının xərci (USD). Giriş, çıxış və "düşünmə" tokenləri ayrı qiymətlə hesablanır.
- * usage: response.usageMetadata. Ətraflı bölgü yoxdursa (yalnız total), 85% giriş / 15% çıxış sayılır.
+ * Bir AI çağırışının xərci (USD). usage Gemini formatındadır (Claude cavabı llm.js-də bu formata çevrilir):
+ * promptTokenCount (keş daxil), cachedContentTokenCount (keşdən oxunan), cacheWriteTokenCount (Claude keşə yazma),
+ * candidatesTokenCount + thoughtsTokenCount (çıxış). Ətraflı bölgü yoxdursa (yalnız total), 85% giriş / 15% çıxış sayılır.
  */
 export function callCostUsd(model, usage) {
   if (!usage) return 0;
-  const p = prices()[model] ?? prices()["*"];
+  const base = prices()[model] ?? prices()["*"];
   const total = num(usage.totalTokenCount);
   const hasSplit = usage.promptTokenCount !== undefined || usage.candidatesTokenCount !== undefined;
-  const cached = Math.min(num(usage.cachedContentTokenCount), num(usage.promptTokenCount));
   const prompt = hasSplit ? num(usage.promptTokenCount) + num(usage.toolUsePromptTokenCount) : Math.round(total * 0.85);
   const output = hasSplit ? num(usage.candidatesTokenCount) + num(usage.thoughtsTokenCount) : total - Math.round(total * 0.85);
-  return ((prompt - cached) * p.in + cached * (p.cachedIn ?? p.in) + output * p.out) / 1e6;
+  const p = base.tier && prompt > base.tier.over ? { ...base, ...base.tier } : base;
+  const cached = Math.min(num(usage.cachedContentTokenCount), prompt);
+  const written = Math.min(num(usage.cacheWriteTokenCount), prompt - cached);
+  const fresh = prompt - cached - written;
+  return (fresh * p.in + cached * (p.cachedIn ?? p.in) + written * (p.cacheWrite ?? p.in) + output * p.out) / 1e6;
+}
+
+/** Embedding xərci: cavabda token sayı gəlmir, ~4 simvol = 1 token kimi təxmin edilir. */
+export function embedUsage(texts) {
+  const tokens = Math.ceil(texts.reduce((n, t) => n + String(t).length, 0) / 4);
+  return { promptTokenCount: tokens, candidatesTokenCount: 0, totalTokenCount: tokens };
 }
 
 /** Bir sorğu boyu bütün çağırışları toplayan sayğac (uğursuz model cəhdlərinin xərci də itmir). */

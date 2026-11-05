@@ -1,0 +1,32 @@
+{
+  "acc": {
+    "tenant-3d66ecfb954e6f0c": {
+      "_id": "tenant-3d66ecfb954e6f0c",
+      "free": 1977820,
+      "freeMonth": "2026-11",
+      "paid": 0,
+      "creditLimit": 0,
+      "markup": null,
+      "spent": 22180,
+      "notified": {
+        "low": false,
+        "empty": false
+      },
+      "v": 14,
+      "createdAt": "2026-11-03T13:25:44.545Z"
+    }
+  },
+  "ledger": [],
+  "days": {
+    "tenant-3d66ecfb954e6f0c:2026-11-03": {
+      "_id": "tenant-3d66ecfb954e6f0c:2026-11-03",
+      "tenantId": "tenant-3d66ecfb954e6f0c",
+      "date": "2026-11-03",
+      "billed": 22180,
+      "cost": 14786,
+      "requests": 14,
+      "tokens": 70340
+    }
+  },
+  "reqs": []
+}

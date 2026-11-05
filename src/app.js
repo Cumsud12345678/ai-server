@@ -409,7 +409,8 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
       const support = req.tenant.profile?.mode === "support";
       // Əməliyyat təklifi yalnız portal üzərindən (təsdiq də orada olur) və yalnız söhbət ID-si varsa
       const cleanSid = typeof sid === "string" && /^[\w.:-]{6,100}$/.test(sid) ? sid : null;
-      const actionCtx = req.viaPortal && cleanSid ? { sid: cleanSid, channel: ["widget", "telegram", "whatsapp"].includes(req.body?.channel) ? req.body.channel : "widget" } : {};
+      const channel = ["widget", "telegram", "whatsapp"].includes(req.body?.channel) ? req.body.channel : "widget";
+      const actionCtx = req.viaPortal && cleanSid ? { sid: cleanSid, channel } : {};
       // Şəkil əvvəl mətnə çevrilir; sonrakı axın dəyişməz qalır
       let vision = null;
       if (image) {
@@ -431,7 +432,7 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
         ? { answer: qaHit.answer, listings: [], sources: [], tokens: 0, costUsd: 0, qa: true, searched: false }
         : support
         ? await kbFn({ tenant: req.tenant, message: question, history: hist, identity, ...actionCtx })
-        : await adviseFn({ tenant: req.tenant, repo: await getRepo(req.tenant), message: question, history: hist, identity, ...actionCtx, live: Boolean(req.viaPortal && req.body?.live === true) });
+        : await adviseFn({ tenant: req.tenant, repo: await getRepo(req.tenant), message: question, history: hist, identity, channel, ...actionCtx, live: Boolean(req.viaPortal && req.body?.live === true) });
       const r = vision ? { ...r0, tokens: (r0.tokens ?? 0) + vision.tokens, costUsd: (r0.costUsd ?? 0) + (vision.costUsd ?? 0) } : r0;
       mark("model");
       await addTokens(req.tenant, r.tokens);

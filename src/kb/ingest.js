@@ -2,7 +2,9 @@
 import { createHash } from "node:crypto";
 import { extractFile, cleanText, KbError } from "./extract.js";
 import { chunkText } from "./chunk.js";
-import { embedDocuments } from "./embed.js";
+import { embedDocuments, MODEL as EMBED_MODEL } from "./embed.js";
+import { callCostUsd, embedUsage } from "../billing/pricing.js";
+import { charge } from "../billing/billing.js";
 import { fetchPage, crawlSite } from "./crawl.js";
 import { assertSafeUrl } from "../connectors/safeFetch.js";
 import { listSources, newSource, putSource, replaceSourceChunks, countChunks, getSource } from "./store.js";
@@ -37,7 +39,12 @@ async function indexPages(tenant, source, pages) {
   if (!prepared.length) throw new KbError("Mətn tapılmadı", "EMPTY");
   const others = (await countChunks(tenant.tenantId)) - (source.chunks ?? 0);
   if (others + prepared.length > maxChunks(tenant)) throw new KbError("Bilik bazası həcm limitini aşır. Köhnə mənbələri silin və ya daha kiçik sənəd yükləyin.", "CHUNK_LIMIT");
-  const vectors = await embedDocuments(prepared.map((c) => `${c.title}${c.heading ? " — " + c.heading : ""}\n${c.text}`));
+  const texts = prepared.map((c) => `${c.title}${c.heading ? " — " + c.heading : ""}\n${c.text}`);
+  const vectors = await embedDocuments(texts);
+  // Embedding xərci də müştərinin balansından çıxılır (əvvəl bu xərci sən ödəyirdin)
+  const usage = embedUsage(texts);
+  try { await charge(tenant, { costUsd: callCostUsd(EMBED_MODEL(), usage), tokens: usage.totalTokenCount, requests: 0 }); }
+  catch (e) { console.error(`[billing] ${tenant.tenantId} embedding xərci yazılmadı:`, e.message); }
   await replaceSourceChunks(tenant.tenantId, source._id, prepared.map((c, i) => ({ ...c, emb: vectors[i] })));
   return { chunks: prepared.length, chars: prepared.reduce((n, c) => n + c.text.length, 0) };
 }

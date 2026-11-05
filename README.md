@@ -2,7 +2,7 @@
 
 ## Quraşdırma
 1. `npm install`
-2. `.env.example` → `.env` kopyala, `GEMINI_API_KEY`-i yaz
+2. `.env.example` → `.env` kopyala, `ANTHROPIC_API_KEY` və `GEMINI_API_KEY`-i yaz (çat Claude Haiku 5.5 ilə, embedding və səs Gemini ilə işləyir; Claude açarı olmasa hər şey Gemini ilə işləyir)
 3. Test: `npm test` (Gemini və DB tələb etmir)
 
 ## Sınaq (3 terminal)

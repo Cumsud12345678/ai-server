@@ -1,13 +1,11 @@
 // Analitika: sualların mövzulara bölünməsi və biliyə nəyin əlavə olunmalı olduğu. Bir (ucuz) Gemini çağırışı, yalnız sahib basanda.
 // Sayları model yox, kod hesablayır: model yalnız hansı sualın hansı mövzuya aid olduğunu bildirir.
-import { GoogleGenAI } from "@google/genai";
+import { aiClient, chatModels, RETRYABLE } from "../ai/llm.js";
 import { newMeter } from "../billing/pricing.js";
 
-const MODELS = (process.env.GEMINI_MODELS || "gemini-3.5-flash,gemini-3-flash-preview").split(",").map((s) => s.trim()).filter(Boolean);
 export const MIN_QUESTIONS = 5;
 export const MAX_ITEMS = 150;
-let ai;
-const defaultClient = () => (ai ??= new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY }));
+const defaultClient = aiClient;
 const LANG = { az: "Azərbaycan dilində", en: "ingilis dilində", ru: "rus dilində", tr: "türk dilində" };
 
 const promptFor = (items, language) => `Aşağıda bir saytın çat köməkçisinə verilən suallar var (nömrə. sual ×neçə dəfə). [cavabsız] = köməkçi cavab tapmayıb, [bəyənilməyib] = istifadəçi cavabı bəyənməyib.
@@ -33,7 +31,7 @@ export async function analyzeTopics({ items, language = "az", client = defaultCl
   const list = items.slice(0, MAX_ITEMS);
   const meter = newMeter();
   let lastErr, parsed = null;
-  for (const model of MODELS) {
+  for (const model of chatModels()) {
     try {
       const res = await client.models.generateContent({ model, contents: [{ role: "user", parts: [{ text: promptFor(list, language) }] }], config: { maxOutputTokens: 1500, responseMimeType: "application/json" } });
       meter.add(model, res.usageMetadata);
@@ -42,7 +40,7 @@ export async function analyzeTopics({ items, language = "az", client = defaultCl
       lastErr = new Error("Model cavabı oxunmadı");
     } catch (err) {
       lastErr = err;
-      if ([503, 500, 429, 404].includes(err.status)) continue;
+      if (RETRYABLE.includes(err.status)) continue;
       throw err;
     }
   }

@@ -1,7 +1,7 @@
 // Gemini embedding: sənəd hissələri və sorğu üçün vektorlar (L2-normallaşdırılmış, cosine = dot product).
 import { geminiClient } from "./client.js";
 
-const MODEL = () => process.env.GEMINI_EMBED_MODEL || "gemini-embedding-001";
+export const MODEL = () => process.env.GEMINI_EMBED_MODEL || "gemini-embedding-001";
 const DIM = () => Number(process.env.GEMINI_EMBED_DIM) || 768;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

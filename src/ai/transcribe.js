@@ -1,9 +1,14 @@
 // Səsli mesaj: audio ayrıca ucuz bir Gemini çağırışı ilə mətnə çevrilir, sonra mətn adi sual kimi axına verilir.
 // Səs heç yerdə saxlanmır.
 import { GoogleGenAI } from "@google/genai";
+import { chatModels, geminiOnly, RETRYABLE } from "./llm.js";
 import { newMeter } from "../billing/pricing.js";
 
-const MODELS = (process.env.GEMINI_MODELS || "gemini-3.5-flash,gemini-3-flash-preview").split(",").map((s) => s.trim()).filter(Boolean);
+// Claude audio qəbul etmir: səs həmişə Gemini ilə mətnə çevrilir. AUDIO_MODELS verilməyibsə çat sırasındakı Gemini modelləri götürülür.
+const MODELS = () => {
+  const list = process.env.AUDIO_MODELS ? process.env.AUDIO_MODELS.split(",").map((s) => s.trim()).filter(Boolean) : geminiOnly(chatModels());
+  return list.length ? list : ["gemini-3.5-flash-lite", "gemini-3.5-flash"];
+};
 export const AUDIO_MAX_BYTES = 2_000_000; // WhatsApp səs qeydi (opus) dəqiqəyə ~120 KB-dır
 let ai;
 const defaultClient = () => (ai ??= new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY }));
@@ -39,7 +44,7 @@ Səs boşdursa, anlaşılmazdırsa və ya danışıq yoxdursa yalnız ANLAŞILMA
 export async function transcribeAudio({ audio, client = defaultClient() }) {
   const meter = newMeter();
   let lastErr;
-  for (const model of MODELS) {
+  for (const model of MODELS()) {
     try {
       const res = await client.models.generateContent({
         model,
@@ -52,7 +57,7 @@ export async function transcribeAudio({ audio, client = defaultClient() }) {
       return { text: unclear ? "" : raw, unclear, tokens: meter.tokens, costUsd: meter.costUsd };
     } catch (err) {
       lastErr = err;
-      if ([503, 500, 429, 404].includes(err.status)) continue;
+      if (RETRYABLE.includes(err.status)) continue;
       throw err;
     }
   }

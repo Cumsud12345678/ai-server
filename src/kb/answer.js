@@ -10,7 +10,8 @@ import { maskPII, queryLoggingOn } from "../queries/queries.js";
 import { actionDeclarations, actionsPrompt, isActionTool, runActionTool } from "../actions/actions.js";
 import { privateDeclarations, privatePrompt, privateToolNames, runPrivateTool } from "../private/privateData.js";
 
-const MODELS = (process.env.GEMINI_MODELS || "gemini-3.5-flash,gemini-3-flash-preview").split(",").map((s) => s.trim()).filter(Boolean);
+import { chatModels, RETRYABLE } from "../ai/llm.js";
+import { historyContents } from "../ai/history.js";
 const HISTORY_TURNS = Number(process.env.HISTORY_TURNS) || 6;
 const HISTORY_CHARS = Number(process.env.HISTORY_CHARS) || 700;
 const THINKING_BUDGET = process.env.GEMINI_THINKING_BUDGET ? Number(process.env.GEMINI_THINKING_BUDGET) : null;
@@ -41,7 +42,8 @@ ${p.generalKnowledge === false
     : "6. Sual şirkətin fəaliyyət sahəsinə aid ümumi sualdırsa (məs. məhsul və ya xidmət növü, seçim məsləhəti, ümumi anlayışlar) və kontekstdə cavab yoxdursa, qısa ümumi bilikdən cavab verə bilərsən, amma cavabın əvvəlində \"Bu ümumi məlumatdır, şirkətin rəsmi məlumatı deyil\" qeydini yaz, şirkətin qiymət, şərt və siyasətləri haqqında heç nə uydurma, bu halda [[NO_ANSWER]] yazma. Sahəyə aid olmayan suallara (kod, siyasət və s.) cavab vermə, nəzakətlə yalnız bu şirkətin mövzusunda kömək edə bildiyini de və [[NO_ANSWER]] yaz."}
 7. İstifadəçi operatorla, canlı insanla və ya menecerlə danışmaq istəyirsə: operatora birbaşa qoşa bilmədiyini, amma əlaqə formasında telefon və ya email qoysa operatorun onunla əlaqə saxlayacağını yaz və [[NO_ANSWER]] əlavə et.
 8. Elan və ya məhsul axtarışı, göstərmək və ya satış təklif etmə: bu rejimdə yalnız suallara cavab verirsən. Özünü "məsləhətçi" və ya "elan köməkçisi" kimi təqdim etmə.
-9. Cavabdan sonra ayrıca sətirdə istifadə etdiyin kontekst nömrələrini yaz, məsələn: [[S:1,3]]. NO_ANSWER halında bunu yazma.
+9. Tarixçədəki əvvəlki cavabların qısaldılmış saxlanılır (sonu kəsilmiş ola bilər): bu səhv deyil. Əvvəlki cavabını natamam və ya səhv sayma, üzr istəmə, özbaşına düzəliş etmə; yalnız istifadəçi konkret səhv göstərsə yoxla. "Tamam", "sağ ol" kimi mesajlara bir qısa cümlə ilə cavab ver.
+10. Cavabdan sonra ayrıca sətirdə istifadə etdiyin kontekst nömrələrini yaz, məsələn: [[S:1,3]]. NO_ANSWER halında bunu yazma.
 Ton: ${p.tone ?? "dostcasına, peşəkar"}.${p.extraInstructions ? "\n" + p.extraInstructions : ""}${privatePrompt(tenant, identity)}${sid ? actionsPrompt(tenant, identity) : ""}${procedurePrompt(proc)}`;
 }
 
@@ -111,11 +113,11 @@ export async function answerFromKb({ tenant, message, history = [], identity = n
   }
   const meter = newMeter();
   const contents = [
-    ...history.slice(-HISTORY_TURNS).map((h) => ({ role: h.role === "model" ? "model" : "user", parts: [{ text: String(h.text).slice(0, HISTORY_CHARS) }] })),
+    ...historyContents(history, HISTORY_TURNS, HISTORY_CHARS),
     { role: "user", parts: [{ text: `KONTEKST:\n${relevant ? contextBlock(hits) : weak ? `(Diqqət: aşağıdakı hissələr suala zəif uyğun gələ bilər. Cavab onlarda varsa istifadə et, yoxdursa uydurma və [[NO_ANSWER]] yaz.)\n${contextBlock(hits.slice(0, 3))}` : "(şirkətin məlumatlarında uyğun məzmun tapılmadı)"}\n\nİSTİFADƏÇİNİN SUALI:\n${message}` }] },
   ];
   let lastErr;
-  for (const model of MODELS) {
+  for (const model of chatModels()) {
     try {
       const ptools = [...(identity ? privateDeclarations(tenant) : []), ...actionDeclarations(tenant, { identity, sid })];
       const pctx = {};
@@ -139,7 +141,7 @@ export async function answerFromKb({ tenant, message, history = [], identity = n
       return { answer, sources: noAnswer || !usable ? [] : sourcesOf(hits, used), unanswered: noAnswer, tokens, costUsd, listings: [], ...priv };
     } catch (err) {
       lastErr = err;
-      if ([503, 500, 429, 404].includes(err.status)) { console.warn(`[gemini] ${model} alınmadı (${err.status}), növbəti model`); continue; }
+      if (RETRYABLE.includes(err.status)) { console.warn(`[ai] ${model} alınmadı (${err.status}), növbəti model`); continue; }
       throw err;
     }
   }

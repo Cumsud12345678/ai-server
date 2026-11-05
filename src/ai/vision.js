@@ -1,14 +1,12 @@
 // Şəkilli sual: şəkil ayrıca ucuz bir çağırışla qısa mətnə çevrilir (növ, marka/model, rəng, tip, yazı),
 // sonra bu mətn adi sual kimi mövcud axtarış/cavab axınına verilir. Şəkil heç yerdə saxlanmır.
-import { GoogleGenAI } from "@google/genai";
+import { aiClient, chatModels, RETRYABLE } from "./llm.js";
 import { newMeter } from "../billing/pricing.js";
 
-const MODELS = (process.env.GEMINI_MODELS || "gemini-3.5-flash,gemini-3-flash-preview").split(",").map((s) => s.trim()).filter(Boolean);
 export const IMAGE_MAX_BYTES = 2_000_000; // widget şəkli əvvəlcədən kiçildir; bu, son sərhəddir
 export const DEFAULT_IMAGE_QUESTION = "Bu şəkildəki kimi nə var?";
 
-let ai;
-const defaultClient = () => (ai ??= new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY }));
+const defaultClient = aiClient;
 
 export function sniffMime(buf) {
   if (buf.length > 12 && buf[0] === 0x89 && buf.subarray(1, 4).toString() === "PNG") return "image/png";
@@ -39,7 +37,7 @@ Yaz: obyektin növü, marka və model (tanıyırsansa; əmin deyilsənsə "ehtim
 export async function describeImage({ image, caption = "", client = defaultClient() }) {
   const meter = newMeter();
   let lastErr;
-  for (const model of MODELS) {
+  for (const model of chatModels()) {
     try {
       const res = await client.models.generateContent({
         model,
@@ -52,7 +50,7 @@ export async function describeImage({ image, caption = "", client = defaultClien
       return { description: inappropriate ? "" : raw, inappropriate, tokens: meter.tokens, costUsd: meter.costUsd };
     } catch (err) {
       lastErr = err;
-      if ([503, 500, 429, 404].includes(err.status)) continue;
+      if (RETRYABLE.includes(err.status)) continue;
       throw err;
     }
   }

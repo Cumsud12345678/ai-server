@@ -46,13 +46,13 @@ export async function canSpend(tenant) {
  * Sorğudan sonra: real xərci yazır. Qaytarır { billedAzn, balanceAzn, state, notify? }.
  * notify ("low" | "empty") yalnız həmin vəziyyətə İLK keçiddə verilir: portal bundan email göndərir.
  */
-export async function charge(tenant, { costUsd = 0, tokens = 0 } = {}) {
+export async function charge(tenant, { costUsd = 0, tokens = 0, requests = 1 } = {}) {
   const st = store();
   const tenantId = tenant.tenantId;
   let acc = await ensure(tenantId);
   const billed = billedMicro(costUsd, acc.markup ?? config.markup());
   const rawCost = billedMicro(costUsd, 1);
-  await st.incDay(tenantId, today(), { billed, cost: rawCost, requests: 1, tokens });
+  await st.incDay(tenantId, today(), { billed, cost: rawCost, requests, tokens });
   if (billed <= 0) return { billedAzn: 0, balanceAzn: fromMicro(acc.free + acc.paid), state: stateOf(acc) };
 
   for (let i = 0; i < MAX_TRIES; i++) {

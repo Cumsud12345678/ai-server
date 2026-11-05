@@ -4,7 +4,7 @@ import { searchKb } from "./search.js";
 import { contextBlock, generate } from "./answer.js";
 import { newMeter } from "../billing/pricing.js";
 
-const MODELS = (process.env.GEMINI_MODELS || "gemini-3.5-flash,gemini-3-flash-preview").split(",").map((s) => s.trim()).filter(Boolean);
+import { chatModels, RETRYABLE } from "../ai/llm.js";
 const LANG = { az: "Azərbaycan dili (Latın əlifbası)", en: "English", ru: "русский", tr: "Türkçe" };
 const clip = (v, n) => String(v ?? "").slice(0, n);
 
@@ -28,7 +28,7 @@ Qaydalar: yalnız aşağıdakı KONTEKSTDƏ və söhbətdə olan məlumata əsas
   const contents = [{ role: "user", parts: [{ text: `KONTEKST:\n${kb || "(uyğun məzmun tapılmadı)"}\n\n${convo}\n\nOperatorun növbəti mesajının qaralaması:` }] }];
   const meter = newMeter();
   let lastErr;
-  for (const model of MODELS) {
+  for (const model of chatModels()) {
     try {
       const res = await generate(client, { model, contents, config: { systemInstruction: system } });
       meter.add(model, res.usageMetadata);
@@ -36,7 +36,7 @@ Qaydalar: yalnız aşağıdakı KONTEKSTDƏ və söhbətdə olan məlumata əsas
       return { draft, tokens: meter.tokens, costUsd: meter.costUsd };
     } catch (err) {
       lastErr = err;
-      if ([503, 500, 429, 404].includes(err.status)) continue;
+      if (RETRYABLE.includes(err.status)) continue;
       throw err;
     }
   }
