@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { extractFile, cleanText, KbError } from "./extract.js";
 import { chunkText } from "./chunk.js";
 import { embedDocuments, MODEL as EMBED_MODEL } from "./embed.js";
-import { callCostUsd, embedUsage } from "../billing/pricing.js";
+import { callCostUsd, embedUsage, reportModelCost } from "../billing/pricing.js";
 import { charge } from "../billing/billing.js";
 import { fetchPage, crawlSite } from "./crawl.js";
 import { assertSafeUrl } from "../connectors/safeFetch.js";
@@ -43,7 +43,9 @@ async function indexPages(tenant, source, pages) {
   const vectors = await embedDocuments(texts);
   // Embedding xərci də müştərinin balansından çıxılır (əvvəl bu xərci sən ödəyirdin)
   const usage = embedUsage(texts);
-  try { await charge(tenant, { costUsd: callCostUsd(EMBED_MODEL(), usage), tokens: usage.totalTokenCount, requests: 0 }); }
+  const embedCost = callCostUsd(EMBED_MODEL(), usage);
+  reportModelCost(EMBED_MODEL(), embedCost, usage.totalTokenCount);
+  try { await charge(tenant, { costUsd: embedCost, tokens: usage.totalTokenCount, requests: 0 }); }
   catch (e) { console.error(`[billing] ${tenant.tenantId} embedding xərci yazılmadı:`, e.message); }
   await replaceSourceChunks(tenant.tenantId, source._id, prepared.map((c, i) => ({ ...c, emb: vectors[i] })));
   return { chunks: prepared.length, chars: prepared.reduce((n, c) => n + c.text.length, 0) };

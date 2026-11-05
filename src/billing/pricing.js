@@ -51,14 +51,25 @@ export function embedUsage(texts) {
   return { promptTokenCount: tokens, candidatesTokenCount: 0, totalTokenCount: tokens };
 }
 
+// Model üzrə ümumi xərc statistikası (admin "Maliyyə" səhifəsi). Yalnız işlək serverdə (index.js) qoşulur, testlərdə boşdur.
+let modelHook = null;
+/** fn(model, costUsd, tokens): hər AI çağırışından sonra çağırılır. Xəta sorğunu dayandırmamalıdır. */
+export const onModelCost = (fn) => { modelHook = fn; };
+export const reportModelCost = (model, costUsd, tokens) => {
+  if (!modelHook || !model) return;
+  try { const p = modelHook(model, costUsd, tokens); if (p?.catch) p.catch(() => {}); } catch { /* statistika vacib deyil */ }
+};
+
 /** Bir sorğu boyu bütün çağırışları toplayan sayğac (uğursuz model cəhdlərinin xərci də itmir). */
 export function newMeter() {
   const m = { costUsd: 0, tokens: 0, calls: 0, models: [] };
   m.add = (model, usage) => {
-    m.costUsd += callCostUsd(model, usage);
+    const cost = callCostUsd(model, usage);
+    m.costUsd += cost;
     m.tokens += num(usage?.totalTokenCount);
     m.calls++;
     if (!m.models.includes(model)) m.models.push(model);
+    reportModelCost(model, cost, num(usage?.totalTokenCount));
   };
   return m;
 }

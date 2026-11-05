@@ -10,7 +10,7 @@ function fileStore() {
   let st;
   const load = () => {
     if (!st) { try { st = JSON.parse(fs.readFileSync(FILE(), "utf8")); } catch { st = {}; } }
-    st.acc ??= {}; st.ledger ??= []; st.days ??= {}; st.reqs ??= [];
+    st.acc ??= {}; st.ledger ??= []; st.days ??= {}; st.reqs ??= []; st.models ??= {};
     return st;
   };
   const save = () => { try { fs.writeFileSync(FILE(), JSON.stringify(st, null, 2)); } catch (e) { console.warn("[billing] yazıla bilmədi:", e.message); } };
@@ -32,6 +32,15 @@ function fileStore() {
       save();
     },
     async listDays(tenantId, sinceDate) { return clone(Object.values(load().days).filter((d) => d.tenantId === tenantId && d.date >= sinceDate).sort((a, b) => (a.date < b.date ? 1 : -1))); },
+    async listAllDays(sinceDate) { return clone(Object.values(load().days).filter((d) => d.date >= sinceDate)); },
+    async listAllLedger() { return clone(load().ledger); },
+    async incModel(month, model, inc) {
+      const s = load(); const k = `${month}:${model}`;
+      const d = (s.models[k] ??= { _id: k, month, model, cost: 0, calls: 0, tokens: 0 });
+      for (const [f, n] of Object.entries(inc)) d[f] = (d[f] ?? 0) + n;
+      save();
+    },
+    async listModels(sinceMonth) { return clone(Object.values(load().models).filter((d) => d.month >= sinceMonth)); },
     async insertReq(r) { const s = load(); s.reqs.push(clone(r)); save(); },
     async getReq(id) { return clone(load().reqs.find((r) => r._id === id)) ?? null; },
     async setReqStatus(id, from, to, extra = {}) {
@@ -60,6 +69,7 @@ function mongoStore() {
     try {
       await (await c("billing_ledger")).createIndex({ tenantId: 1, at: -1 });
       await (await c("billing_days")).createIndex({ tenantId: 1, date: -1 });
+      await (await c("billing_days")).createIndex({ date: -1 });
       await (await c("billing_requests")).createIndex({ tenantId: 1, status: 1 });
     } catch (e) { indexed = false; console.warn("[billing] indeks yaradıla bilmədi:", e.message); }
   };
@@ -74,6 +84,12 @@ function mongoStore() {
       await (await c("billing_days")).updateOne({ _id: `${tenantId}:${date}` }, { $inc: inc, $setOnInsert: { tenantId, date } }, { upsert: true });
     },
     async listDays(tenantId, sinceDate) { return (await c("billing_days")).find({ tenantId, date: { $gte: sinceDate } }).sort({ date: -1 }).toArray(); },
+    async listAllDays(sinceDate) { return (await c("billing_days")).find({ date: { $gte: sinceDate } }).limit(200_000).toArray(); },
+    async listAllLedger() { return (await c("billing_ledger")).find({}).limit(100_000).toArray(); },
+    async incModel(month, model, inc) {
+      await (await c("billing_models")).updateOne({ _id: `${month}:${model}` }, { $inc: inc, $setOnInsert: { month, model } }, { upsert: true });
+    },
+    async listModels(sinceMonth) { return (await c("billing_models")).find({ month: { $gte: sinceMonth } }).toArray(); },
     async insertReq(r) { await (await c("billing_requests")).insertOne(r); },
     async getReq(id) { return (await (await c("billing_requests")).findOne({ _id: id })) ?? null; },
     async setReqStatus(id, from, to, extra = {}) {

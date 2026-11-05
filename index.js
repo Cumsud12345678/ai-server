@@ -9,9 +9,12 @@ process.on("uncaughtException", (e) => {
   process.exit(1);
 });
 import { initStores } from "./src/store/init.js";
+import { onModelCost } from "./src/billing/pricing.js";
+import { recordModelCost } from "./src/billing/billing.js";
 
 const PORT = process.env.PORT || 3000;
 await initStores();
+onModelCost((model, costUsd, tokens) => recordModelCost(model, costUsd, tokens)); // admin "Maliyyə": model üzrə xərc
 const server = createApp().listen(PORT, () => console.log(`Server: http://localhost:${PORT}`));
 // Deploy/restart zamanı yarımçıq sorğular kəsilməsin: yeni sorğu qəbul etmə, mövcudları bitir, sonra çıx.
 for (const sig of ["SIGINT", "SIGTERM"]) {

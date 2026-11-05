@@ -21,7 +21,7 @@ export async function autoRefreshTick({ now = Date.now(), refresh = refreshSourc
   let n = 0;
   for (const tenant of tenants) {
     const every = intervalOf(tenant);
-    if (!every || tenant.profile?.mode === "listings") continue; // elan rejimində bilik bazası istifadə olunmur
+    if (!every || tenant.profile?.mode === "listings" || tenant.suspended) continue; // elan rejimində bilik bazası istifadə olunmur; dayandırılmış hesab yenilənmir
     let sources;
     try { sources = await listSources(tenant.tenantId); } catch (e) { console.error("[kb] avto-yenilənmə siyahısı alınmadı:", e.message); continue; }
     for (const s of dueSources(sources, every, now)) {

@@ -3,6 +3,7 @@ import { listRequests, requestTopup, resolveRequest, setSettings, summary, topup
 import { activeProvider, getProvider } from "./providers.js";
 import { store } from "./storage.js";
 import { fromMicro } from "./pricing.js";
+import { finance } from "./finance.js";
 
 const wrap = (fn) => async (req, res) => {
   try { await fn(req, res); }
@@ -46,6 +47,9 @@ export function registerBillingRoutes(app, { serviceAuth, customerTenant }) {
     const rows = await store().listAccounts();
     res.json({ accounts: rows.map((a) => ({ tenantId: a._id, totalAzn: fromMicro(a.free + a.paid), paidAzn: fromMicro(a.paid), spentAzn: fromMicro(a.spent ?? 0) })) });
   }));
+
+  // Admin: maliyyə hesabatı (pul girişi, AI xərci, mənfəət, model və müştəri üzrə)
+  app.get("/v1/service/billing/finance", serviceAuth, wrap(async (req, res) => res.json(await finance({ months: req.query.months }))));
 
   // Ödəniş şlüzü xəbəri (provayder qoşulanda işləyir)
   app.post("/v1/billing/webhook/:provider", wrap(async (req, res) => {

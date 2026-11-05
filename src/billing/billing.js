@@ -34,8 +34,9 @@ const stateOf = (a) => {
   return total <= 0 ? "empty" : total <= toMicro(config.lowAzn()) ? "low" : "ok";
 };
 
-/** Sorğudan əvvəl: balans (və kredit limiti) bitibsə dayandırır. */
+/** Sorğudan əvvəl: hesab admin tərəfindən dayandırılıbsa və ya balans (və kredit limiti) bitibsə dayandırır. */
 export async function canSpend(tenant) {
+  if (tenant?.suspended) return { ok: false, code: "TENANT_SUSPENDED", message: "Hesab müvəqqəti dayandırılıb" };
   if (!config.enforce()) return { ok: true };
   const acc = await ensure(tenant.tenantId);
   if (available(acc) > 0) return { ok: true };
@@ -66,6 +67,8 @@ export async function charge(tenant, { costUsd = 0, tokens = 0, requests = 1 } =
     if (state === "empty" && !notified.empty) { notified.empty = true; notified.low = true; notify = "empty"; }
     else if (state === "low" && !notified.low) { notified.low = true; notify = "low"; }
     if (await st.casAcc(tenantId, acc.v, { free, paid, spent: (acc.spent ?? 0) + billed, notified })) {
+      // Pulsuz hissədən çıxılan məbləğ gəlir deyil: maliyyə hesabatında ayrıca göstərilir
+      if (fromFree > 0) await st.incDay(tenantId, today(), { free: fromFree }).catch(() => {});
       return { billedAzn: fromMicro(billed), balanceAzn: fromMicro(free + paid), state, ...(notify && { notify }) };
     }
     await backoff(i);
@@ -76,6 +79,7 @@ export async function charge(tenant, { costUsd = 0, tokens = 0, requests = 1 } =
   const a = await st.getAcc(tenantId);
   const fromFree = Math.min(a.free, billed);
   await st.casAcc(tenantId, a.v, { free: a.free - fromFree, paid: a.paid - (billed - fromFree), spent: (a.spent ?? 0) + billed });
+  if (fromFree > 0) await st.incDay(tenantId, today(), { free: fromFree }).catch(() => {});
   return { billedAzn: fromMicro(billed), balanceAzn: fromMicro(a.free + a.paid - billed), state: "ok" };
 }
 
@@ -198,4 +202,9 @@ export async function summary(tenantId, { admin = false, history = true } = {}) 
 }
 
 export const deleteTenantBilling = (tenantId) => store().deleteTenant(tenantId);
+
+/** Model üzrə aylıq xərc (onModelCost hook-u ilə çağırılır). Xərc mikro-manatla, vuruqsuz (real xərc). */
+export async function recordModelCost(model, costUsd, tokens = 0) {
+  await store().incModel(month(), String(model).slice(0, 80), { cost: billedMicro(costUsd, 1), calls: 1, tokens: Math.round(Number(tokens) || 0) });
+}
 export { MICRO };

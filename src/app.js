@@ -296,6 +296,18 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
     res.json({ ok: true, profile });
   });
 
+  // Admin müştərini dayandırır / aktiv edir: dayandırılmış müştərinin bütün AI sorğuları 402 TENANT_SUSPENDED alır.
+  app.patch("/v1/service/tenants/:tenantId/suspend", serviceAuth, customerTenant, async (req, res) => {
+    const suspended = req.body?.suspended;
+    if (typeof suspended !== "boolean") return res.status(400).json({ error: "suspended true/false olmalıdır" });
+    await updateCustomerTenant(req.tenant.tenantId, (t) => {
+      const { suspended: _old, ...rest } = t;
+      return suspended ? { ...rest, suspended: { at: new Date().toISOString() } } : rest;
+    });
+    refreshTenants();
+    res.json({ ok: true, suspended });
+  });
+
   // Köhnə açar dərhal etibarsız olur, yenisi yalnız bir dəfə qaytarılır.
   app.post("/v1/service/tenants/:tenantId/rotate-key", serviceAuth, customerTenant, async (req, res) => {
     const apiKey = newKey();
@@ -364,6 +376,8 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
     next();
   };
   const gateOr429 = async (req, res, opts) => {
+    // Admin hesabı dayandırıbsa heç bir sorğu (AI-sız axtarış da) işləmir
+    if (req.tenant?.suspended) { res.status(402).json({ error: "Hesab müvəqqəti dayandırılıb", code: "TENANT_SUSPENDED" }); return false; }
     // Balans (pulsuz məbləğ + yüklənmiş pul) bitibsə sorğu AI-a getmir; AI-sız əməliyyatlar (countMonthly: false) pulsuzdur
     if (opts?.countMonthly !== false) {
       const funds = await canSpend(req.tenant);
