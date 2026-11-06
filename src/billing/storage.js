@@ -10,7 +10,7 @@ function fileStore() {
   let st;
   const load = () => {
     if (!st) { try { st = JSON.parse(fs.readFileSync(FILE(), "utf8")); } catch { st = {}; } }
-    st.acc ??= {}; st.ledger ??= []; st.days ??= {}; st.reqs ??= []; st.models ??= {};
+    st.acc ??= {}; st.ledger ??= []; st.days ??= {}; st.reqs ??= []; st.models ??= {}; st.settings ??= {};
     return st;
   };
   const save = () => { try { fs.writeFileSync(FILE(), JSON.stringify(st, null, 2)); } catch (e) { console.warn("[billing] yazıla bilmədi:", e.message); } };
@@ -33,6 +33,18 @@ function fileStore() {
     },
     async listDays(tenantId, sinceDate) { return clone(Object.values(load().days).filter((d) => d.tenantId === tenantId && d.date >= sinceDate).sort((a, b) => (a.date < b.date ? 1 : -1))); },
     async listAllDays(sinceDate) { return clone(Object.values(load().days).filter((d) => d.date >= sinceDate)); },
+    async getDay(tenantId, date) { return clone(load().days[`${tenantId}:${date}`]) ?? null; },
+    async getSetting(key) { return clone(load().settings[key]) ?? null; },
+    async setSetting(key, value) { const s = load(); if (value == null) delete s.settings[key]; else s.settings[key] = clone(value); save(); },
+    /** Admin "Ödənişlər": bütün müştərilər üzrə, ən yenidən köhnəyə. before: səhifələmə (bu tarixdən köhnələr). */
+    async queryLedger({ tenantId, since, until, before, limit = 100 }) {
+      return clone(load().ledger.filter((x) => (!tenantId || x.tenantId === tenantId) && (!since || x.at >= since) && (!until || x.at < until) && (!before || x.at < before))
+        .sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0)).slice(0, limit));
+    },
+    async queryReqs({ tenantId, status, since, until, before, limit = 100 }) {
+      return clone(load().reqs.filter((r) => (!tenantId || r.tenantId === tenantId) && (!status || r.status === status) && (!since || r.at >= since) && (!until || r.at < until) && (!before || r.at < before))
+        .sort((a, b) => (a.at < b.at ? 1 : -1)).slice(0, limit));
+    },
     async listAllLedger() { return clone(load().ledger); },
     async incModel(month, model, inc) {
       const s = load(); const k = `${month}:${model}`;
@@ -71,6 +83,8 @@ function mongoStore() {
       await (await c("billing_days")).createIndex({ tenantId: 1, date: -1 });
       await (await c("billing_days")).createIndex({ date: -1 });
       await (await c("billing_requests")).createIndex({ tenantId: 1, status: 1 });
+      await (await c("billing_requests")).createIndex({ at: -1 });
+      await (await c("billing_ledger")).createIndex({ at: -1 });
     } catch (e) { indexed = false; console.warn("[billing] indeks yaradıla bilmədi:", e.message); }
   };
   const dup = (e) => e?.code === 11000;
@@ -85,6 +99,25 @@ function mongoStore() {
     },
     async listDays(tenantId, sinceDate) { return (await c("billing_days")).find({ tenantId, date: { $gte: sinceDate } }).sort({ date: -1 }).toArray(); },
     async listAllDays(sinceDate) { return (await c("billing_days")).find({ date: { $gte: sinceDate } }).limit(200_000).toArray(); },
+    async getDay(tenantId, date) { return (await (await c("billing_days")).findOne({ _id: `${tenantId}:${date}` })) ?? null; },
+    async getSetting(key) { const d = await (await c("billing_settings")).findOne({ _id: key }); return d ? d.value : null; },
+    async setSetting(key, value) {
+      const col = await c("billing_settings");
+      if (value == null) await col.deleteMany({ _id: key });
+      else await col.updateOne({ _id: key }, { $set: { value } }, { upsert: true });
+    },
+    async queryLedger({ tenantId, since, until, before, limit = 100 }) {
+      const f = {}; if (tenantId) f.tenantId = tenantId;
+      const at = {}; if (since) at.$gte = since; if (until || before) at.$lt = [until, before].filter(Boolean).sort()[0];
+      if (Object.keys(at).length) f.at = at;
+      return (await c("billing_ledger")).find(f).sort({ at: -1 }).limit(limit).toArray();
+    },
+    async queryReqs({ tenantId, status, since, until, before, limit = 100 }) {
+      const f = {}; if (tenantId) f.tenantId = tenantId; if (status) f.status = status;
+      const at = {}; if (since) at.$gte = since; if (until || before) at.$lt = [until, before].filter(Boolean).sort()[0];
+      if (Object.keys(at).length) f.at = at;
+      return (await c("billing_requests")).find(f).sort({ at: -1 }).limit(limit).toArray();
+    },
     async listAllLedger() { return (await c("billing_ledger")).find({}).limit(100_000).toArray(); },
     async incModel(month, model, inc) {
       await (await c("billing_models")).updateOne({ _id: `${month}:${model}` }, { $inc: inc, $setOnInsert: { month, model } }, { upsert: true });

@@ -84,7 +84,9 @@ export const config = {
   minTopupAzn: () => envNum("BILLING_MIN_TOPUP_AZN", 10),
   maxTopupAzn: () => envNum("BILLING_MAX_TOPUP_AZN", 1000),
   enforce: () => process.env.BILLING_ENFORCE !== "false", // false: yalnız hesablayır, heç vaxt dayandırmır (keçid dövrü)
-  defaultAvgAzn: () => 0.0022,                           // sorğu tarixçəsi olmayanda göstərilən orta qiymət (təxmini)
+  defaultAvgAzn: () => 0.0022,
+  // Müştəri başına gündəlik xərc tavanı (müştəriyə yazılan manatla). 0 = limit yoxdur. Admin hər müştəri üçün ayrıca dəyişə bilər.
+  dailyLimitAzn: () => envNum("BILLING_DAILY_LIMIT_AZN", 0),                           // sorğu tarixçəsi olmayanda göstərilən orta qiymət (təxmini)
 };
 
 export const MICRO = 1_000_000;

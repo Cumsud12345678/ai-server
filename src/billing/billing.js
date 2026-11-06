@@ -34,11 +34,41 @@ const stateOf = (a) => {
   return total <= 0 ? "empty" : total <= toMicro(config.lowAzn()) ? "low" : "ok";
 };
 
-/** Sorğudan əvvəl: hesab admin tərəfindən dayandırılıbsa və ya balans (və kredit limiti) bitibsə dayandırır. */
+// ---- Ümumi AI açarı (admin): bütün müştərilər üçün AI sorğularını dayandırır ----
+// Hər sorğuda bazaya getməmək üçün 5 saniyə yaddaşda saxlanır; dəyişəndə dərhal yenilənir.
+let controlCache = { at: 0, value: null };
+export async function getAiControl() {
+  if (Date.now() - controlCache.at < 5000) return controlCache.value ?? { paused: false };
+  const v = await store().getSetting("ai_control").catch(() => controlCache.value);
+  controlCache = { at: Date.now(), value: v };
+  return v ?? { paused: false };
+}
+export async function setAiControl({ paused, reason = "", by = "" }) {
+  if (typeof paused !== "boolean") throw Object.assign(new Error("paused true/false olmalıdır"), { status: 400 });
+  const value = paused ? { paused: true, reason: String(reason).slice(0, 300), by: String(by).slice(0, 80), at: new Date().toISOString() } : null;
+  await store().setSetting("ai_control", value);
+  controlCache = { at: Date.now(), value };
+  return value ?? { paused: false };
+}
+export const resetAiControlCache = () => { controlCache = { at: 0, value: null }; };
+
+const dailyLimitOf = (acc) => (acc.dailyLimit != null ? acc.dailyLimit : toMicro(config.dailyLimitAzn()));
+
+/**
+ * Sorğudan əvvəl yoxlama (sıra ilə): ümumi AI açarı, hesabın dayandırılması, balans (və kredit limiti), gündəlik xərc tavanı.
+ * Gündəlik tavan balansdan asılı deyil: botun sui-istifadəsi və ya ilişib qalan inteqrasiya bir gündə balansı yandırmasın.
+ */
 export async function canSpend(tenant) {
+  const control = await getAiControl();
+  if (control.paused) return { ok: false, code: "AI_PAUSED", message: "AI müvəqqəti dayandırılıb" };
   if (tenant?.suspended) return { ok: false, code: "TENANT_SUSPENDED", message: "Hesab müvəqqəti dayandırılıb" };
-  if (!config.enforce()) return { ok: true };
   const acc = await ensure(tenant.tenantId);
+  const limit = dailyLimitOf(acc);
+  if (limit > 0) {
+    const day = await store().getDay(tenant.tenantId, today());
+    if ((day?.billed ?? 0) >= limit) return { ok: false, code: "DAILY_LIMIT", message: "Gündəlik xərc limitinə çatılıb" };
+  }
+  if (!config.enforce()) return { ok: true };
   if (available(acc) > 0) return { ok: true };
   return { ok: false, code: "BALANCE_EMPTY", message: "Balans bitib" };
 }
@@ -110,7 +140,7 @@ export async function topup(tenantId, amountAzn, { note = "", by = "", ref, type
   return { duplicate: false, ...(await summary(tenantId)) };
 }
 
-export async function setSettings(tenantId, { markup, creditLimitAzn }) {
+export async function setSettings(tenantId, { markup, creditLimitAzn, dailyLimitAzn }) {
   const st = store();
   const patch = {};
   if (markup !== undefined) {
@@ -121,6 +151,15 @@ export async function setSettings(tenantId, { markup, creditLimitAzn }) {
     const n = Number(creditLimitAzn);
     if (!(n >= 0 && n <= 10_000)) throw Object.assign(new Error("Kredit limiti 0 ilə 10000 arasında olmalıdır"), { status: 400 });
     patch.creditLimit = toMicro(n);
+  }
+  if (dailyLimitAzn !== undefined) {
+    // null/"" = ümumi qayda (BILLING_DAILY_LIMIT_AZN), 0 = bu müştəri üçün limit yoxdur
+    if (dailyLimitAzn === null || dailyLimitAzn === "") patch.dailyLimit = null;
+    else {
+      const n = Number(dailyLimitAzn);
+      if (!(n >= 0 && n <= 10_000)) throw Object.assign(new Error("Gündəlik limit 0 ilə 10000 arasında olmalıdır"), { status: 400 });
+      patch.dailyLimit = toMicro(n);
+    }
   }
   await ensure(tenantId);
   for (let i = 0; i < MAX_TRIES; i++) {
@@ -147,6 +186,35 @@ export async function requestTopup(tenantId, amountAzn, { provider = "manual" } 
 const publicReq = (r) => ({ id: r._id, tenantId: r.tenantId, amountAzn: fromMicro(r.amount), status: r.status, provider: r.provider, at: r.at, ...(r.note && { note: r.note }) });
 
 export async function listRequests(opts) { return (await store().listReqs(opts)).map(publicReq); }
+
+// ---- Admin "Ödənişlər": sorğular və balans hərəkətləri (bütün müştərilər üzrə, süzgəc və səhifələmə ilə) ----
+const isoOrNull = (v) => { if (typeof v !== "string" || !v) return null; const d = new Date(v); return Number.isNaN(d.getTime()) ? null : d.toISOString(); };
+const pageOpts = (q) => ({
+  tenantId: typeof q.tenantId === "string" && q.tenantId ? q.tenantId.slice(0, 80) : undefined,
+  since: isoOrNull(q.since) ?? undefined, until: isoOrNull(q.until) ?? undefined, before: isoOrNull(q.before) ?? undefined,
+  limit: Math.min(500, Math.max(1, Math.round(Number(q.limit) || 100))),
+});
+const adminReq = (r) => ({ ...publicReq(r), ...(r.resolvedAt && { resolvedAt: r.resolvedAt }), ...(r.resolvedBy && { resolvedBy: r.resolvedBy }) });
+export async function adminRequests(q = {}) {
+  const status = ["pending", "approved", "rejected"].includes(q.status) ? q.status : undefined;
+  const o = pageOpts(q);
+  const rows = await store().queryReqs({ ...o, status, limit: o.limit + 1 });
+  return { requests: rows.slice(0, o.limit).map(adminReq), nextBefore: rows.length > o.limit ? rows[o.limit - 1].at : null };
+}
+/** kind: payment = ödəniş şlüzü və ya təsdiqlənmiş sorğu, manual = admin əl ilə əlavə, adjust = mənfi düzəliş */
+const ledgerKind = (e) => (e.amount < 0 ? "adjust" : String(e._id).startsWith("req:") || String(e._id).startsWith("pay:") ? "payment" : "manual");
+export async function adminLedger(q = {}) {
+  const o = pageOpts(q);
+  const kind = ["payment", "manual", "adjust"].includes(q.kind) ? q.kind : undefined;
+  // kind süzgəci yaddaşda tətbiq olunur: səhifə dolmaya bilər, ona görə bir az artıq oxunur
+  const rows = await store().queryLedger({ ...o, limit: kind ? Math.min(2000, o.limit * 5) : o.limit + 1 });
+  const filtered = kind ? rows.filter((e) => ledgerKind(e) === kind) : rows;
+  const page = filtered.slice(0, o.limit);
+  return {
+    entries: page.map((e) => ({ id: e._id, tenantId: e.tenantId, at: e.at, kind: ledgerKind(e), type: e.type, amountAzn: fromMicro(e.amount), note: e.note || "", by: e.by || "" })),
+    nextBefore: (kind ? rows.length >= Math.min(2000, o.limit * 5) || filtered.length > o.limit : rows.length > o.limit) && page.length ? page[page.length - 1].at : null,
+  };
+}
 
 export async function resolveRequest(id, action, by = "") {
   const st = store();
@@ -196,7 +264,11 @@ export async function summary(tenantId, { admin = false, history = true } = {}) 
     out.ledger = (await st.listLedger(tenantId, 30)).map((e) => ({ id: e._id, at: e.at, type: e.type, amountAzn: fromMicro(e.amount), note: e.note || "" }));
   }
   if (admin) {
-    out.admin = { markup: acc.markup ?? null, defaultMarkup: config.markup(), creditLimitAzn: fromMicro(acc.creditLimit ?? 0), costAzn30: fromMicro(last30.cost), lifetimeSpentAzn: fromMicro(acc.spent ?? 0) };
+    const todayRow = days.find((d) => d.date === today());
+    out.admin = {
+      markup: acc.markup ?? null, defaultMarkup: config.markup(), creditLimitAzn: fromMicro(acc.creditLimit ?? 0), costAzn30: fromMicro(last30.cost), lifetimeSpentAzn: fromMicro(acc.spent ?? 0),
+      dailyLimitAzn: acc.dailyLimit != null ? fromMicro(acc.dailyLimit) : null, defaultDailyLimitAzn: config.dailyLimitAzn(), todayAzn: fromMicro(todayRow?.billed ?? 0),
+    };
   }
   return out;
 }

@@ -1,5 +1,5 @@
 // Balans marşrutları (xidmət açarı ilə: portal çağırır) və ödəniş provayderinin webhook-u.
-import { listRequests, requestTopup, resolveRequest, setSettings, summary, topup } from "./billing.js";
+import { adminLedger, adminRequests, getAiControl, listRequests, requestTopup, resolveRequest, setAiControl, setSettings, summary, topup } from "./billing.js";
 import { activeProvider, getProvider } from "./providers.js";
 import { store } from "./storage.js";
 import { fromMicro } from "./pricing.js";
@@ -39,9 +39,17 @@ export function registerBillingRoutes(app, { serviceAuth, customerTenant }) {
 
   // Admin: gözləyən sorğular və bütün balanslar
   app.get("/v1/service/billing/requests", serviceAuth, wrap(async (req, res) => {
-    const status = ["pending", "approved", "rejected"].includes(req.query.status) ? req.query.status : "pending";
+    // Köhnə çağırış (yalnız status): gözləyənlər siyahısı. Yeni: status=all və süzgəclər + səhifələmə (Ödənişlər səhifəsi)
+    const q = req.query;
+    if (q.status === "all" || q.tenantId || q.since || q.until || q.before || q.limit) return res.json(await adminRequests({ ...q, status: q.status === "all" ? undefined : q.status }));
+    const status = ["pending", "approved", "rejected"].includes(q.status) ? q.status : "pending";
     res.json({ requests: await listRequests({ status, limit: 100 }) });
   }));
+  app.get("/v1/service/billing/ledger", serviceAuth, wrap(async (req, res) => res.json(await adminLedger(req.query))));
+
+  // Ümumi AI açarı (admin)
+  app.get("/v1/service/ai-control", serviceAuth, wrap(async (_req, res) => res.json(await getAiControl())));
+  app.put("/v1/service/ai-control", serviceAuth, wrap(async (req, res) => res.json(await setAiControl(req.body ?? {}))));
   app.post("/v1/service/billing/requests/:id/:action", serviceAuth, wrap(async (req, res) => res.json(await resolveRequest(String(req.params.id).slice(0, 80), req.params.action, String(req.body?.by ?? "").slice(0, 80)))));
   app.get("/v1/service/billing/accounts", serviceAuth, wrap(async (_req, res) => {
     const rows = await store().listAccounts();
