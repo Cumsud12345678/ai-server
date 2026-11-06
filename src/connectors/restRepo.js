@@ -79,6 +79,51 @@ export function createRestRepo(tenant) {
     return (list.find((x) => x.name.toLowerCase() === v) ?? list.find((x) => x.name.toLowerCase().includes(v)))?.id;
   };
 
+  /**
+   * AI filtri səhv sahəyə qoya bilər: "Tufan" markasını sərbəst mətnə və ya model sahəsinə yazır, nəticə 0 olur.
+   * Böyük siyahılar (60+ marka) prompta qoyulmadığı üçün AI hansı adın marka olduğunu bilmir. Burada düzəldirik:
+   *  1) siyahılı sahədəki ad öz siyahısında yoxdursa, başqa siyahıda DƏQİQ varsa ora köçürülür;
+   *  2) sərbəst mətndə siyahıdakı ad (marka, model, şəhər...) varsa, həmin filtrə çevrilir və mətndən çıxarılır.
+   * Qaytarır: { f: düzəldilmiş filtrlər, moved: ["Tufan → make", ...] }
+   */
+  function normalizeFilters(input, vocab) {
+    const f = { ...input };
+    const moved = [];
+    const lists = schema.args.filter((a) => a.valueFrom === "vocabulary" && a.kind !== "multi" && vocab[a.name]?.length);
+    if (!lists.length) return { f, moved };
+    const exact = (a, value) => {
+      const v = slugify(value);
+      return v ? vocab[a.name].find((x) => slugify(x.name) === v)?.name : undefined;
+    };
+    // 1) yanlış siyahıya düşmüş ad
+    for (const a of lists) {
+      if (f[a.name] === undefined || resolveName(vocab[a.name], f[a.name]) !== undefined) continue;
+      const to = lists.find((b) => b !== a && f[b.name] === undefined && exact(b, f[a.name]));
+      if (to) { f[to.name] = exact(to, f[a.name]); moved.push(`${f[a.name]}: ${a.name} → ${to.name}`); delete f[a.name]; }
+    }
+    // 2) sərbəst mətndə siyahı adı (çox sözlü adlar əvvəl: "Royal Enfield" "Royal"-dan öncə)
+    const textArg = schema.args.find((a) => a.kind === "text");
+    if (textArg && typeof f[textArg.name] === "string") {
+      let words = slugify(f[textArg.name]).split("-").filter(Boolean);
+      for (const a of lists) {
+        if (f[a.name] !== undefined || !words.length) continue;
+        const names = vocab[a.name].map((x) => ({ name: x.name, w: slugify(x.name).split("-").filter(Boolean) })).filter((x) => x.w.length && x.w.join("").length >= 3 && !/^\d+$/.test(x.w.join(""))).sort((p, q) => q.w.length - p.w.length);
+        for (const n of names) {
+          const at = words.findIndex((_, i) => n.w.every((w, j) => words[i + j] === w));
+          if (at === -1) continue;
+          f[a.name] = n.name;
+          words = [...words.slice(0, at), ...words.slice(at + n.w.length)];
+          moved.push(`${n.name}: ${textArg.name} → ${a.name}`);
+          break;
+        }
+      }
+      if (moved.some((m) => m.includes(`${textArg.name} →`))) {
+        if (words.length) f[textArg.name] = words.join(" "); else delete f[textArg.name];
+      }
+    }
+    return { f, moved };
+  }
+
   // Sxemdəki filtrləri müştərinin parametrlərinə çevirir. Ad tapılmasa null (nəticə yoxdur).
   function buildParams(f, vocab, vocabError) {
     const params = {};
@@ -114,10 +159,12 @@ export function createRestRepo(tenant) {
     return params;
   }
 
-  async function searchWithDebug(f) {
-    const debug = { request: null, cached: false, rawCount: 0, rawFirst: null, dropped: [], note: null };
+  async function searchWithDebug(input) {
+    const debug = { request: null, cached: false, rawCount: 0, rawFirst: null, dropped: [], note: null, moved: [] };
     let vocab = {}, vocabError = null;
     try { vocab = await loadVocabulary(); } catch (e) { vocabError = e; }
+    let f = input;
+    if (!vocabError) ({ f, moved: debug.moved } = normalizeFilters(input, vocab));
 
     const params = buildParams(f, vocab, vocabError);
     if (params === null) { debug.note = "Filtrdəki ad müştərinin siyahısında tapılmadı"; return { listings: [], debug }; }

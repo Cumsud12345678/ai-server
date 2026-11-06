@@ -9,11 +9,16 @@ process.on("uncaughtException", (e) => {
   process.exit(1);
 });
 import { initStores } from "./src/store/init.js";
+import { mongoEnabled } from "./src/store/mongo.js";
 import { onModelCost } from "./src/billing/pricing.js";
 import { recordModelCost } from "./src/billing/billing.js";
 
 const PORT = process.env.PORT || 3000;
 await initStores();
+if (!mongoEnabled()) {
+  // Sorğu jurnalı, söhbətlər və s. bu rejimdə yalnız yaddaşdadır: hər restart/deploy-da silinir
+  console.warn("[xəbərdarlıq] AI_MONGODB_URI təyin olunmayıb: sorğular və söhbət tarixçəsi yalnız yaddaşda saxlanır və server yenidən başlayanda SİLİNİR. Production-da AI_MONGODB_URI yaz.");
+}
 onModelCost((model, costUsd, tokens) => recordModelCost(model, costUsd, tokens)); // admin "Maliyyə": model üzrə xərc
 const server = createApp().listen(PORT, () => console.log(`Server: http://localhost:${PORT}`));
 // Deploy/restart zamanı yarımçıq sorğular kəsilməsin: yeni sorğu qəbul etmə, mövcudları bitir, sonra çıx.

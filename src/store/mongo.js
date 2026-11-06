@@ -1,5 +1,4 @@
 // Müştərilər və istifadə sayğacı üçün MongoDB bağlantısı (AI_MONGODB_URI verilibsə).
-// Elanların oxunduğu "own-site" bazasından (MONGODB_URI) ayrıdır: onlara toxunmur.
 import mongoose from "mongoose";
 
 let injected; // testlər üçün

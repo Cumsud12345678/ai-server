@@ -61,3 +61,17 @@ test("timeout", async () => {
   await assert.rejects(createRestRepo(t).search(S({ maxPrice: 1 })), /vaxtında/);
   slow.close(); slow.closeAllConnections?.();
 });
+
+test("səhv sahəyə düşmüş marka adı düzgün filtrə keçir", async () => {
+  const r = await repo.searchWithDebug(S({ bodyType: "BMW" }));
+  assert.deepEqual([...new Set(r.listings.map((l) => l.make))], ["BMW"]);
+  assert.ok(r.debug.moved.length === 1);
+});
+test("sərbəst mətndəki marka adı marka filtrinə çevrilir", async () => {
+  const t = demoTenant(mock.url);
+  t.source.filters.q = { type: "text", description: "Açar söz", param: "q" };
+  const rr = createRestRepo(t);
+  const r = await rr.searchWithDebug(sanitizeFilters({ q: "bmw" }, { maxResults: 5, schema: rr.schema }));
+  assert.deepEqual([...new Set(r.listings.map((l) => l.make))], ["BMW"]);
+  assert.ok(!r.debug.request.includes("q="), "mətn boş qalanda göndərilməməlidir");
+});

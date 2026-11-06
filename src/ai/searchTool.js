@@ -36,15 +36,29 @@ function compactForModel(l) {
   return out;
 }
 
+/** 0 nəticənin səbəbi (rest konnektorunun debug məlumatından) */
+function emptyReason(d) {
+  if (!d) return "mənbə 0 elan qaytardı";
+  if (!d.request) return d.note ?? "sorğu göndərilmədi";
+  if (d.rawCount === 0) return `saytın API-si 0 elan qaytardı (${d.request}${d.cached ? ", keşdən" : ""})`;
+  if (d.dropped?.length) return `API ${d.rawCount} elan qaytardı, ${d.dropped.length}-i xəritələmədə atıldı: ${String(d.dropped[0]).slice(0, 120)}`;
+  return [`API ${d.rawCount} elan qaytardı, hamısı süzüldü`, d.note].filter(Boolean).join("; ");
+}
+
 // ctx.listings: AI-ın gördüyü bütün elanlar (API cavabında kartlar üçün qaytarılır)
 export async function runTool(repo, tenant, name, args, ctx) {
   if (name !== "search_listings") return { error: `Naməlum alət: ${name}` };
   ctx.searched = true; // sorğu qeydi: axtarış həqiqətən aparılıb
   try {
     const filters = sanitizeFilters(args ?? {}, { maxResults: tenant.profile?.maxResults, schema: repo.schema });
-    const listings = await repo.search(filters);
+    let listings, debug = null;
+    if (repo.searchWithDebug) ({ listings, debug } = await repo.searchWithDebug(filters));
+    else listings = await repo.search(filters);
     ctx.listings.push(...listings);
     if (process.env.DEBUG_SEARCH) console.log(`[search] ${tenant.tenantId} AI filtri:`, JSON.stringify(args), "→", listings.length, "elan");
+    if (debug?.moved?.length) console.log(`[search] ${tenant.tenantId} filtr düzəldildi: ${debug.moved.join("; ")}`);
+    // Boş nəticə xəta deyil, amma səbəbi görünməlidir: niyə 0 elan qayıtdı?
+    if (!listings.length) console.warn(`[search] ${tenant.tenantId} 0 elan · filtr: ${JSON.stringify(args ?? {})} · ${emptyReason(debug)}`);
     return { count: listings.length, listings: listings.map(compactForModel) };
   } catch (err) {
     ctx.failed = true; // xətalı cavab keşlənmir

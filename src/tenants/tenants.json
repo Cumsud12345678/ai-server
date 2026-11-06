@@ -19,24 +19,6 @@
     }
   },
   {
-    "tenantId": "own-site",
-    "devOnly": true,
-    "apiKeyHash": "6cfb8c7247608e0028ef51faa44507e1b1e21e1dabd1ad642300cf06aef2a42c",
-    "language": "az",
-    "limits": {
-      "monthlyRequests": 5000,
-      "ratePerMinute": 30
-    },
-    "profile": {
-      "domain": "avtomobil və motosiklet",
-      "tone": "dostcasına",
-      "maxResults": 5
-    },
-    "source": {
-      "type": "mongo"
-    }
-  },
-  {
     "tenantId": "demo-musteri",
     "devOnly": true,
     "apiKeyHash": "a0f0b841280b1c88ff238d789483806848d976ee85d4fbcda9d473f4f6c9526a",

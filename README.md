@@ -15,7 +15,6 @@ Postman (Authorization: Bearer ...) , hazır inkişaf açarları (yalnız lokal!
 |---|---|---|
 | demo-sample | ck_dev_sample | nümunə data |
 | demo-musteri | ck_dev_musteri | saxta müştəri API-si (fərqli sxem) |
-| own-site | ck_dev_own | real MongoDB (.env-də MONGODB_URI) |
 
 - `POST /v1/chat`      body: `{ "message": "...", "history": [] }` → `{ answer, listings, usage }`
 - `GET  /v1/listings?maxPrice=10000&make=BMW`  (AI olmadan, debug)

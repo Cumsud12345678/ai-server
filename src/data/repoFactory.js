@@ -12,8 +12,8 @@ export async function getRepo(tenant) {
   if (repos.has(id)) return repos.get(id);
   const type = tenant.source?.type;
   let repo;
-  if (type === "memory" || type === "mongo") {
-    const m = await import(type === "memory" ? "./memoryRepo.js" : "./mongoRepo.js");
+  if (type === "memory") {
+    const m = await import("./memoryRepo.js");
     repo = { schema: LEGACY_SCHEMA, supportedFilters: FILTER_KEYS, sortFields: LEGACY_SCHEMA.sortFields, search: m.search, vocabulary: m.vocabulary };
   } else if (type === "rest") {
     const { createRestRepo } = await import("../connectors/restRepo.js");
