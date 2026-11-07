@@ -250,7 +250,10 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
     const old = req.tenant;
     const error = validateConfig(body, { secretAlreadyStored: !!old.source?.auth?.encryptedValue });
     if (error) return res.status(400).json({ error });
-    const supportOnly = body.profile?.mode === "support";
+    // Rejim JSON-da yazılmayıbsa: "yalnız dəstək" rejimində elan mənbəyi qoşmaq = "elanlar + dəstək" istəmək.
+    // Əks halda mənbə saxlanırdı, amma çat onu istifadə etmirdi (səssiz uğursuzluq).
+    const mode = body.profile?.mode ?? (old.profile?.mode === "support" && body.source ? "both" : undefined);
+    const supportOnly = mode === "support";
     let source, checked = { sampleCount: 0, sampleListings: [] }, feedParsed = null;
     if (!supportOnly) {
       try {
@@ -268,7 +271,7 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
       if (problem) return res.status(422).json({ ok: false, ...problem, debug: checked.debug });
     }
 
-    const profile = mergeProfile(old.profile, body.profile ?? {}, { businessName: body.businessName.trim(), domain: body.domain.trim() });
+    const profile = mergeProfile(old.profile, { ...(body.profile ?? {}), ...(mode && { mode }) }, { businessName: body.businessName.trim(), domain: body.domain.trim() });
     if (feedParsed) {
       const meta = feedMeta(source.feed, feedParsed, feedParsed.items.length);
       if (feedParsed.stored && old.source?.feed?.updatedAt) meta.updatedAt = old.source.feed.updatedAt;
@@ -281,7 +284,7 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
     });
     refreshTenants();
     dropRepo(old.tenantId);
-    res.json({ ok: true, sampleCount: checked.sampleCount, sampleListings: checked.sampleListings });
+    res.json({ ok: true, sampleCount: checked.sampleCount, sampleListings: checked.sampleListings, profile, modeChanged: (old.profile?.mode ?? "listings") !== profile.mode });
   });
 
   app.patch("/v1/service/tenants/:tenantId/profile", serviceAuth, customerTenant, async (req, res) => {
@@ -530,15 +533,20 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
     res.json(privateView({ privateData: next }));
   });
   app.delete("/v1/service/tenants/:tenantId/private-data", serviceAuth, customerTenant, async (req, res) => {
-    await updateCustomerTenant(req.tenant.tenantId, (t) => { const { privateData: _p, ...rest } = t; return rest; });
+    // API ayarları silinir. Gizli açar yalnız girişli əməliyyat varsa qalır (onlar da ondan istifadə edir); yoxdursa o da silinir.
+    await updateCustomerTenant(req.tenant.tenantId, (t) => {
+      const { privateData: p, ...rest } = t;
+      const keep = p?.identity && (t.actions?.items ?? []).some((a) => a.requireIdentity);
+      return keep ? { ...rest, privateData: { identity: p.identity } } : rest;
+    });
     refreshTenants();
     res.json({ ok: true });
   });
   // Saytın serverində tokeni imzalamaq üçün gizli açar: yalnız yaradılanda bir dəfə göstərilir, köhnəsi dərhal etibarsız olur.
   app.post("/v1/service/tenants/:tenantId/private-data/identity-secret", serviceAuth, customerTenant, async (req, res) => {
-    if (!req.tenant.privateData) return res.status(400).json({ error: "Əvvəlcə sifariş/ödəniş mənbəyini qoşun", code: "NO_PRIVATE_DATA" });
+    // Açar həm "Müştəri məlumatı", həm də girişli "Əməliyyatlar" üçündür: məlumat mənbəyi olmadan da yaradılır
     const secret = newIdentitySecret();
-    await updateCustomerTenant(req.tenant.tenantId, (t) => ({ ...t, privateData: { ...t.privateData, identity: { secretEnc: encryptSecret(secret), createdAt: new Date().toISOString() } } }));
+    await updateCustomerTenant(req.tenant.tenantId, (t) => ({ ...t, privateData: { ...(t.privateData ?? {}), identity: { secretEnc: encryptSecret(secret), createdAt: new Date().toISOString() } } }));
     refreshTenants();
     res.status(201).json({ identitySecret: secret });
   });

@@ -117,7 +117,7 @@ export function prepareActions(input, apiSecret, previous) {
 /** Panelə qaytarılan görünüş: heç bir sirr yoxdur. */
 export function actionsView(tenant) {
   const d = tenant.actions;
-  if (!d) return { configured: false, items: [], signing: { configured: false } };
+  if (!d) return { configured: false, items: [], signing: { configured: false }, identityReady: Boolean(tenant.privateData?.identity?.secretEnc) };
   const { auth, signingSecretEnc, signingCreatedAt, ...rest } = d;
   return { configured: true, ...rest, items: Array.isArray(rest.items) ? rest.items : [],
     ...(auth && { auth: { type: auth.type, ...(auth.name && { name: auth.name }), hasSecret: Boolean(auth.encryptedValue) } }),

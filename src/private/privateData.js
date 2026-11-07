@@ -132,7 +132,8 @@ export function privateView(tenant) {
   const d = tenant.privateData;
   if (!d) return { configured: false, sources: [], identity: { configured: false } };
   const { identity, auth, ...rest } = d;
-  return { configured: true, ...rest, ...(auth && { auth: { type: auth.type, ...(auth.name && { name: auth.name }), hasSecret: Boolean(auth.encryptedValue) } }),
+  // Yalnız gizli açar var (məlumat mənbəyi yox): API qoşulmayıb sayılır
+  return { configured: Boolean(d.baseUrl && d.sources?.length), ...rest, sources: d.sources ?? [], ...(auth && { auth: { type: auth.type, ...(auth.name && { name: auth.name }), hasSecret: Boolean(auth.encryptedValue) } }),
     identity: { configured: Boolean(identity?.secretEnc), createdAt: identity?.createdAt ?? null }, ready: privateReady(tenant) };
 }
 
