@@ -63,3 +63,13 @@ test("profil: cavab uzunluğu və köməkçinin adı saxlanır, prompt-a düşü
   assert.match(s, /Ton: rəsmi/); assert.match(s, /Aysel/); assert.match(s, /qısa/);
   assert.equal(styleLines({}), "Ton: dostcasına.");
 });
+
+test("profil: şirkətin əlaqə məlumatı saxlanır və prompt-a düşür; boş sahələr atılır", async () => {
+  const { styleLines } = await import("../src/ai/style.js");
+  const created = await call("POST", "/v1/service/tenants", { businessName: "Əlaqə", domain: "e.az", profile: { mode: "support", company: { phone: "+994 12 555 55 55", address: "Nizami küç. 10", instagram: "" } } });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  assert.equal((await call("POST", "/v1/service/tenants", { businessName: "X", domain: "x.az", profile: { mode: "support", company: { fax: "1" } } })).status, 400);
+  assert.equal((await call("POST", "/v1/service/tenants", { businessName: "X", domain: "x.az", profile: { mode: "support", company: { about: "x".repeat(601) } } })).status, 400);
+  const s = styleLines({ company: { phone: "+994 12 555 55 55", hours: "B.e.–Cümə 09:00–18:00" } });
+  assert.match(s, /Telefon: \+994 12 555 55 55/); assert.match(s, /İş saatları: B\.e\./); assert.match(s, /uydurma/);
+});

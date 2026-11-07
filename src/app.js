@@ -30,7 +30,7 @@ import { answerFromKb } from "./kb/answer.js";
 import { draftReply, validDraftInput } from "./kb/draft.js";
 import { registerKbRoutes } from "./kb/routes.js";
 import { deleteTenantKb } from "./kb/store.js";
-import { ANSWER_LENGTHS } from "./ai/style.js";
+import { ANSWER_LENGTHS, cleanCompany, validateCompany } from "./ai/style.js";
 
 const LANGS = ["az", "en", "ru", "tr"];
 const MODES = ["listings", "support", "both"];
@@ -104,6 +104,7 @@ function validateProfile(p) {
   if (p.kbAutoRefresh !== undefined && !["off", "daily", "weekly"].includes(p.kbAutoRefresh)) return "profile.kbAutoRefresh off, daily və ya weekly olmalıdır";
   if (p.answerLength !== undefined && !ANSWER_LENGTHS.includes(p.answerLength)) return "profile.answerLength short, medium və ya long olmalıdır";
   if (p.agentName !== undefined && (typeof p.agentName !== "string" || p.agentName.length > 40)) return "profile.agentName mətn olmalıdır (maksimum 40 simvol)";
+  if (p.company !== undefined) { const e = validateCompany(p.company); if (e) return e; }
   return null;
 }
 
@@ -120,6 +121,7 @@ function mergeProfile(prev = {}, input = {}, extra = {}) {
   if (input.imageSearch !== undefined) next.imageSearch = input.imageSearch;
   if (input.kbAutoRefresh !== undefined) next.kbAutoRefresh = input.kbAutoRefresh;
   if (input.answerLength !== undefined) next.answerLength = input.answerLength;
+  if (input.company !== undefined) { const c = cleanCompany(input.company); if (c) next.company = c; else delete next.company; }
   if (input.agentName !== undefined) next.agentName = input.agentName.replace(/[\u0000-\u001f"]/g, " ").trim();
   next.language ??= "az";
   next.mode ??= "listings";
