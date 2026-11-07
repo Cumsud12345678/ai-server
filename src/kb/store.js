@@ -101,6 +101,7 @@ export async function listInbox(kind, tenantId, { limit = 100 } = {}) {
   const rows = (await byTenant(kind, tenantId)).sort((a, b) => new Date(b.at) - new Date(a.at));
   return { total: rows.length, items: rows.slice(0, Math.min(Math.max(limit, 1), 500)) };
 }
+export async function getInbox(kind, tenantId, id) { return (await byTenant(kind, tenantId)).find((d) => d._id === id) ?? null; }
 export async function updateInbox(kind, tenantId, id, patch) {
   const row = (await byTenant(kind, tenantId)).find((d) => d._id === id);
   if (!row) return null;

@@ -252,6 +252,16 @@ test("müraciət (lead): yoxlama, siyahı, işarələmə, silmə", async () => {
   let list = await (await call("GET", kb("/leads"))).json();
   assert.equal(list.open, 1);
   assert.equal((await call("PATCH", kb(`/leads/${lead.id}`), { handled: true })).status, 200);
+  // status, prioritet, məsul, qeyd və tarixçə
+  let r = await call("PATCH", kb(`/leads/${lead.id}`), { status: "pending", priority: "high", assignee: { name: "Aysel", id: "u1" }, note: "Zəng etdim, cavab gözləyirəm", by: "boss" });
+  assert.equal(r.status, 200);
+  let L = (await r.json()).lead;
+  assert.equal(L.status, "pending"); assert.equal(L.handled, false); assert.equal(L.priority, "high");
+  assert.equal(L.assignee.name, "Aysel"); assert.equal(L.notes[0].by, "boss"); assert.equal(L.history.length, 4, "handled:true da tarixçəyə düşür");
+  assert.equal((await call("PATCH", kb(`/leads/${lead.id}`), { status: "yox" })).status, 400);
+  assert.equal((await call("PATCH", kb(`/leads/${lead.id}`), {})).status, 400);
+  r = await call("PATCH", kb(`/leads/${lead.id}`), { status: "solved", by: "boss" });
+  assert.equal((await r.json()).lead.handled, true);
   list = await (await call("GET", kb("/leads"))).json();
   assert.equal(list.open, 0);
   assert.equal((await call("DELETE", kb(`/leads/${lead.id}`))).status, 200);

@@ -48,6 +48,9 @@ export async function recordQuery(tenant, entry) {
       // Şəxsi məlumat (sifariş/ödəniş) olan cavab mətni heç vaxt saxlanmır
       ...(entry.private ? { private: true } : typeof entry.answer === "string" && entry.answer ? { answer: maskAnswer(entry.answer) } : {}),
       ...(Number.isFinite(entry.costAzn) && { costAzn: Math.round(entry.costAzn * 1e6) / 1e6 }), // müştəriyə yazılan məbləğ (manat)
+      // Panelin "AI söhbətləri"ndə görünsün: göstərilən elanların qısa xülasəsi və təklif olunan əməliyyat (şəxsi cavabda yox)
+      ...(!entry.private && Array.isArray(entry.listings) && entry.listings.length && { listings: entry.listings.slice(0, 6).map(listingBrief) }),
+      ...(!entry.private && entry.confirm && { confirm: { title: String(entry.confirm.title ?? "").slice(0, 100), summary: maskPII(String(entry.confirm.summary ?? "")).slice(0, 300) } }),
     };
     if (mongoEnabled()) { await (await col()).insertOne(doc); return; }
     const list = memory.get(tenant.tenantId) ?? [];
@@ -56,6 +59,12 @@ export async function recordQuery(tenant, entry) {
   } catch (e) { console.warn("[queries] yazıla bilmədi:", e.message); }
 }
 
+const listingBrief = (l) => ({
+  ...(l.id != null && { id: String(l.id).slice(0, 80) }), title: String(l.title ?? "").slice(0, 120),
+  ...(Number.isFinite(l.price) && { price: l.price }), ...(l.currency && { currency: String(l.currency).slice(0, 8) }),
+  ...(typeof l.url === "string" && /^https?:\/\//.test(l.url) && { url: l.url.slice(0, 500) }),
+  ...(typeof l.image === "string" && /^https?:\/\//.test(l.image) && { image: l.image.slice(0, 500) }),
+});
 const view = (d) => ({ id: d._id, at: new Date(d.at).toISOString(), ...(d.sid && { sid: d.sid }), message: d.message, results: d.results, tokens: d.tokens, cached: d.cached, error: d.error, costAzn: d.costAzn ?? null });
 const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const sinceOf = (days) => new Date(Date.now() - days * 86_400_000);
@@ -145,7 +154,25 @@ export async function getConversation(tenantId, sid) {
     ? await (await col()).find({ tenantId, sid }).sort({ at: 1, _id: 1 }).limit(200).toArray()
     : memoryRows(tenantId).filter((d) => d.sid === sid).sort((a, b) => new Date(a.at) - new Date(b.at)).slice(0, 200);
   if (!rows.length) return null;
-  return { sid, messages: rows.map((d) => ({ ...view(d), answer: d.answer ?? null })) };
+  return { sid, messages: rows.map((d) => ({ ...view(d), answer: d.answer ?? null, ...(d.listings && { listings: d.listings }), ...(d.confirm && { confirm: d.confirm }), ...(d.clicks && { clicks: d.clicks }) })) };
+}
+
+/** Ziyarətçi göstərilən elana keçdi: həmin elanı göstərən son cavaba (yoxdursa söhbətin son cavabına) yazılır. */
+export async function recordClick(tenantId, sid, click) {
+  if (!cleanSid(sid) || !click?.id) return false;
+  const c = { id: String(click.id).slice(0, 80), title: String(click.title ?? "").slice(0, 120), at: new Date().toISOString() };
+  const pick = (rows) => rows.find((d) => d.listings?.some((l) => l.id === c.id)) ?? rows[0];
+  if (mongoEnabled()) {
+    const rows = await (await col()).find({ tenantId, sid }).sort({ at: -1 }).limit(30).toArray();
+    const d = pick(rows);
+    if (!d) return false;
+    await (await col()).updateOne({ _id: d._id }, { $push: { clicks: { $each: [c], $slice: -20 } } });
+    return true;
+  }
+  const d = pick(memoryRows(tenantId).filter((x) => x.sid === sid)); // yaddaşda yenidən köhnəyə
+  if (!d) return false;
+  d.clicks = [...(d.clicks ?? []), c].slice(-20);
+  return true;
 }
 
 const norm = (s) => s.toLowerCase().replace(/\s+/g, " ").replace(/[?!.,;]+$/g, "").trim();

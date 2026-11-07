@@ -1,6 +1,6 @@
 // Bilik bazası endpoint-ləri (yalnız portal çağırır: /v1/service/tenants/:tenantId/kb/*)
 import express from "express";
-import { listSources, listInbox, updateInbox, deleteInbox, deleteSource, addInbox, countChunks } from "./store.js";
+import { listSources, listInbox, updateInbox, getInbox, deleteInbox, deleteSource, addInbox, countChunks } from "./store.js";
 import { ingestFile, ingestText, ingestUrl, refreshSource, MAX_FILE_BYTES } from "./ingest.js";
 import { KbError } from "./extract.js";
 import { createQa, updateQa, MAX_QUESTIONS, MAX_QUESTION_CHARS, MAX_ANSWER_CHARS } from "./qa.js";
@@ -87,7 +87,12 @@ export function registerKbRoutes(app, { serviceAuth, customerTenant }) {
 
   // ---- cavabsız suallar ----
   const inboxView = (d) => ({ id: d._id, at: d.at, ...(d.message !== undefined && { message: d.message }), ...(d.reason && { reason: d.reason }),
-    ...(d.contact !== undefined && { name: d.name ?? "", contact: d.contact, question: d.question ?? "", conversation: d.conversation ?? [], handled: Boolean(d.handled) }) });
+    ...(d.contact !== undefined && { name: d.name ?? "", contact: d.contact, question: d.question ?? "", conversation: d.conversation ?? [], handled: leadStatus(d) === "solved",
+      status: leadStatus(d), priority: d.priority ?? "normal", assignee: d.assignee ?? null, notes: d.notes ?? [], history: d.history ?? [], ...(d.updatedAt && { updatedAt: d.updatedAt }) }) });
+  // Müraciətin vəziyyəti: yeni → işdədir → gözləmədə (müştəridən cavab) → həll olunub. Köhnə qeydlərdə yalnız handled var.
+  const LEAD_STATUS = ["new", "open", "pending", "solved"];
+  const LEAD_PRIORITY = ["low", "normal", "high"];
+  const leadStatus = (d) => (LEAD_STATUS.includes(d.status) ? d.status : d.handled ? "solved" : "new");
   app.get(`${base}/unanswered`, ...guard, wrap(async (req, res) => {
     const { total, items } = await listInbox("unanswered", req.tenant.tenantId, { limit: Number(req.query.limit) || 100 });
     res.json({ total, items: items.map(inboxView) });
@@ -99,7 +104,7 @@ export function registerKbRoutes(app, { serviceAuth, customerTenant }) {
   // ---- müraciətlər (operatorla əlaqə) ----
   app.get(`${base}/leads`, ...guard, wrap(async (req, res) => {
     const { total, items } = await listInbox("leads", req.tenant.tenantId, { limit: Number(req.query.limit) || 100 });
-    res.json({ total, open: items.filter((d) => !d.handled).length, items: items.map(inboxView) });
+    res.json({ total, open: items.filter((d) => leadStatus(d) !== "solved").length, items: items.map(inboxView) });
   }));
   const cleanConvo = (c) => (Array.isArray(c) ? c : []).slice(-10)
     .filter((m) => m && (m.role === "user" || m.role === "model") && typeof m.text === "string" && m.text.trim())
@@ -111,10 +116,30 @@ export function registerKbRoutes(app, { serviceAuth, customerTenant }) {
     const doc = await addInbox("leads", req.tenant.tenantId, { name: str(b.name, 80), contact, question: str(b.question, 500), conversation: cleanConvo(b.conversation), handled: false });
     res.status(201).json({ ok: true, lead: inboxView(doc) });
   }));
+  // Dəyişiklik: status, prioritet, məsul operator, daxili qeyd (by: kim etdi, portal verir). Hər dəyişiklik tarixçəyə yazılır.
   app.patch(`${base}/leads/:id`, ...guard, wrap(async (req, res) => {
-    if (typeof req.body?.handled !== "boolean") throw new KbError("handled true/false olmalıdır", "BAD_REQUEST");
-    const d = await updateInbox("leads", req.tenant.tenantId, req.params.id, { handled: req.body.handled });
-    if (!d) return res.status(404).json({ error: "Müraciət tapılmadı" });
+    const b = req.body ?? {};
+    const by = str(b.by, 60) || "—";
+    const patch = {}, events = [];
+    if (typeof b.handled === "boolean") b.status = b.handled ? "solved" : "open";
+    if (b.status !== undefined) { if (!LEAD_STATUS.includes(b.status)) throw new KbError("status düzgün deyil", "BAD_REQUEST"); patch.status = b.status; patch.handled = b.status === "solved"; events.push(`status:${b.status}`); }
+    if (b.priority !== undefined) { if (!LEAD_PRIORITY.includes(b.priority)) throw new KbError("prioritet düzgün deyil", "BAD_REQUEST"); patch.priority = b.priority; events.push(`priority:${b.priority}`); }
+    if (b.assignee !== undefined) {
+      const a = b.assignee;
+      if (a !== null && !(a && typeof a === "object" && typeof a.name === "string" && a.name.trim())) throw new KbError("məsul düzgün deyil", "BAD_REQUEST");
+      patch.assignee = a === null ? null : { name: str(a.name, 60), ...(typeof a.id === "string" && { id: str(a.id, 60) }) };
+      events.push(`assignee:${patch.assignee?.name ?? "-"}`);
+    }
+    const note = str(b.note, 1000);
+    if (!Object.keys(patch).length && !note) throw new KbError("Dəyişiklik yoxdur", "BAD_REQUEST");
+    const cur = await getInbox("leads", req.tenant.tenantId, req.params.id);
+    if (!cur) return res.status(404).json({ error: "Müraciət tapılmadı" });
+    const at = new Date().toISOString();
+    if (note) patch.notes = [...(cur.notes ?? []), { by, at, text: note }].slice(-30);
+    if (events.length) patch.history = [...(cur.history ?? []), ...events.map((e) => ({ by, at, e }))].slice(-50);
+    patch.updatedAt = at;
+    if (cur.status === undefined && patch.status === undefined && !cur.handled) patch.status = "open"; // ilk toxunuş: "yeni" → "işdədir"
+    const d = await updateInbox("leads", req.tenant.tenantId, req.params.id, patch);
     res.json({ lead: inboxView(d) });
   }));
   app.delete(`${base}/leads/:id`, ...guard, wrap(async (req, res) => {

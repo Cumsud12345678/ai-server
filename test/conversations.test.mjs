@@ -35,3 +35,26 @@ test("yanlış sid qəbul edilmir, logQueries=false heç nə yazmır, səhifəl�
   const p2 = await listConversations("conv-page", { limit: 10, before: p1.nextCursor });
   assert.equal(p2.conversations.length, 3);
 });
+
+test("söhbətdə göstərilən elanlar və təklif olunan əməliyyat saxlanır (şəxsi cavabda yox)", async () => {
+  const t = { tenantId: "t-listings" };
+  await recordQuery(t, { message: "honda", results: 1, sid: "bbbbbbbb22", answer: "Tapdım", listings: [{ id: 7, title: "Honda CBR", price: 9000, currency: "AZN", url: "https://moto.az/7", image: "javascript:alert(1)", extra: "x" }], confirm: { title: "Sifarişi ləğv et", summary: "A-1001 ləğv edilsin? Tel: +994501234567" } }); await wait();
+  await recordQuery(t, { message: "sifarişim", results: -1, sid: "bbbbbbbb22", answer: "gizli", private: true, listings: [{ title: "x" }] });
+  const c = await getConversation("t-listings", "bbbbbbbb22");
+  assert.deepEqual(c.messages[0].listings, [{ id: "7", title: "Honda CBR", price: 9000, currency: "AZN", url: "https://moto.az/7" }]);
+  assert.equal(c.messages[0].confirm.title, "Sifarişi ləğv et");
+  assert.ok(!c.messages[0].confirm.summary.includes("501234567"), "telefon maskalanır");
+  assert.equal(c.messages[1].listings, undefined);
+});
+
+test("elan kliki həmin elanı göstərən cavaba yazılır", async () => {
+  const { recordClick } = await import("../src/queries/queries.js");
+  const t = { tenantId: "t-clicks" };
+  await recordQuery(t, { message: "honda", results: 1, sid: "dddddddd44", answer: "a", listings: [{ id: 5, title: "Honda" }] }); await wait();
+  await recordQuery(t, { message: "başqa", results: 1, sid: "dddddddd44", answer: "b", listings: [{ id: 9, title: "Yamaha" }] });
+  assert.equal(await recordClick("t-clicks", "dddddddd44", { id: "5", title: "Honda" }), true);
+  const c = await getConversation("t-clicks", "dddddddd44");
+  assert.equal(c.messages[0].clicks[0].id, "5");
+  assert.equal(c.messages[1].clicks, undefined);
+  assert.equal(await recordClick("t-clicks", "yoxyoxyoxyox", { id: "5" }), false);
+});

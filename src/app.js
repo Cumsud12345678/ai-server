@@ -10,7 +10,7 @@ import { listCustomerTenants, addCustomerTenant, updateCustomerTenant, removeCus
 import { getRepo, dropRepo } from "./data/repoFactory.js";
 import { advise } from "./ai/advisor.js";
 import { analyzeTopics, MIN_QUESTIONS } from "./queries/insights.js";
-import { maskPII, queryTrend, questionSample, recordQuery, listQueries, queryStats, clearQueries, listConversations, getConversation } from "./queries/queries.js";
+import { maskPII, queryTrend, questionSample, recordQuery, recordClick, listQueries, queryStats, clearQueries, listConversations, getConversation } from "./queries/queries.js";
 import { checkAndCount, addTokens, getUsage, getUsageSummary, deleteTenantUsage } from "./usage/usage.js";
 import { canSpend, charge, deleteTenantBilling } from "./billing/billing.js";
 import { registerBillingRoutes } from "./billing/routes.js";
@@ -461,7 +461,7 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
       // results: >0 elan, 0 axtarış aparıldı amma tapılmadı, -1 axtarışsız cavab (ümumi sual və s.), -2 operatora yönləndirildi
       const searched = r.searched ?? true;
       const results = support ? (r.unanswered ? 0 : 1) : !searched ? (r.unanswered ? -2 : -1) : (r.listings?.length ?? 0);
-      if (!req.skipQueryLog) await recordQuery(req.tenant, { message: `${image ? "(şəkil) " : ""}${message.trim()}`, results, tokens: r.tokens, cached: r.cached, costAzn: bill?.billedAzn, sid, answer: r.answer, private: r.private });
+      if (!req.skipQueryLog) await recordQuery(req.tenant, { message: `${image ? "(şəkil) " : ""}${message.trim()}`, results, tokens: r.tokens, cached: r.cached, costAzn: bill?.billedAzn, sid, answer: r.answer, private: r.private, listings: r.listings, confirm: r.confirm });
       mark("log"); slowLog("ok");
       res.json({ answer: r.answer, listings: r.listings ?? [], ...(vision && { imageNote: vision.description.slice(0, 200) }), ...(r.sources && { sources: r.sources }), ...(r.unanswered && { unanswered: true }), ...(r.handoff && { handoff: true }), ...(r.confirm && { confirm: r.confirm }), ...(identityToken && !identity && { identity: "invalid" }), usage: { tokens: r.tokens },
         // Balans vəziyyəti yalnız portala verilir (müştərinin açıq API-sində görünmür)
@@ -612,6 +612,11 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
   app.get("/v1/service/tenants/:tenantId/conversations", serviceAuth, customerTenant, async (req, res) => {
     const n = (v, d) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : d);
     res.json({ enabled: req.tenant.profile?.logQueries !== false, ...(await listConversations(req.tenant.tenantId, { before: String(req.query.before ?? "").slice(0, 40), limit: n(req.query.limit, 30), days: Math.min(n(req.query.days, 30), 90) })) });
+  });
+  // Ziyarətçi AI-nin göstərdiyi elana keçdi (portal vidjetdən ötürür)
+  app.post("/v1/service/tenants/:tenantId/conversations/:sid/clicks", serviceAuth, customerTenant, async (req, res) => {
+    const ok = await recordClick(req.tenant.tenantId, req.params.sid, { id: req.body?.id, title: req.body?.title });
+    res.status(ok ? 200 : 404).json({ ok });
   });
   app.get("/v1/service/tenants/:tenantId/conversations/:sid", serviceAuth, customerTenant, async (req, res) => {
     const c = await getConversation(req.tenant.tenantId, req.params.sid);
