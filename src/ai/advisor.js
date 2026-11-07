@@ -7,6 +7,7 @@ import { kbToolDeclaration, runKbTool, sourcesOf } from "../kb/answer.js";
 import { newMeter } from "../billing/pricing.js";
 import { actionDeclarations, actionsPrompt, hasActions, isActionTool, runActionTool } from "../actions/actions.js";
 import { privateDeclarations, privatePrompt, privateToolNames, runPrivateTool } from "../private/privateData.js";
+import { styleLines } from "./style.js";
 
 // Ziyarətçi operatorla danışmaq istəyəndə və ya köməkçi kömək edə bilməyəndə çağırılır: vidjet əlaqə formasını göstərir.
 const handoffDeclaration = {
@@ -75,7 +76,7 @@ Uyğun elan yoxdursa, "saytda yoxdur" kimi qəti iddia etmə: "bu axtarışda ta
 SÖHBƏT TARİXÇƏSİ: tarixçədəki əvvəlki cavabların yer qənaəti üçün qısaldılmış saxlanılır (sonu kəsilmiş ola bilər) və orada elan kartları, linklər görünmür. Bu, sənin səhvin deyil: əvvəlki cavabını natamam və ya səhv sayma, üzr istəmə, özbaşına "düzəliş" etmə. Yalnız istifadəçi konkret səhvi göstərsə, onu yenidən axtarışla yoxla. "Tamam", "sağ ol", 👍 kimi mesajlara bir qısa cümlə ilə cavab ver.
 Satıcının telefonu və şəxsi məlumatı sənə verilmir, istifadəçini elan linkinə yönləndir.
 İstifadəçi operatorla, canlı insanla və ya menecerlə danışmaq istəyirsə request_operator funksiyasını çağır, "qoşa bilmirəm" deyib bitirmə.
-${p.mode === "both" ? `Şirkət haqqında suallara (çatdırılma, ödəniş, qaydalar, əlaqə, necə işləyir və s.) search_knowledge funksiyası ilə cavab ver və yalnız onun qaytardığı məlumata əsaslan; tapılmasa bilmədiyini de, uydurma. Elan axtarışı üçün search_listings istifadə et.\n` : ""}Ton: ${p.tone ?? "dostcasına"}.
+${p.mode === "both" ? `Şirkət haqqında suallara (çatdırılma, ödəniş, qaydalar, əlaqə, necə işləyir və s.) search_knowledge funksiyası ilə cavab ver və yalnız onun qaytardığı məlumata əsaslan; tapılmasa bilmədiyini de, uydurma. Elan axtarışı üçün search_listings istifadə et.\n` : ""}${styleLines(p)}
 ${LANG[tenant.language] ?? LANG.az}${p.extraInstructions ? "\n" + p.extraInstructions : ""}`;
 }
 

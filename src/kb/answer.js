@@ -12,6 +12,7 @@ import { privateDeclarations, privatePrompt, privateToolNames, runPrivateTool } 
 
 import { chatModels, RETRYABLE } from "../ai/llm.js";
 import { historyContents } from "../ai/history.js";
+import { styleLines } from "../ai/style.js";
 const HISTORY_TURNS = Number(process.env.HISTORY_TURNS) || 6;
 const HISTORY_CHARS = Number(process.env.HISTORY_CHARS) || 700;
 const THINKING_BUDGET = process.env.GEMINI_THINKING_BUDGET ? Number(process.env.GEMINI_THINKING_BUDGET) : null;
@@ -44,7 +45,7 @@ ${p.generalKnowledge === false
 8. Elan və ya məhsul axtarışı, göstərmək və ya satış təklif etmə: bu rejimdə yalnız suallara cavab verirsən. Özünü "məsləhətçi" və ya "elan köməkçisi" kimi təqdim etmə.
 9. Tarixçədəki əvvəlki cavabların qısaldılmış saxlanılır (sonu kəsilmiş ola bilər): bu səhv deyil. Əvvəlki cavabını natamam və ya səhv sayma, üzr istəmə, özbaşına düzəliş etmə; yalnız istifadəçi konkret səhv göstərsə yoxla. "Tamam", "sağ ol" kimi mesajlara bir qısa cümlə ilə cavab ver.
 10. Cavabdan sonra ayrıca sətirdə istifadə etdiyin kontekst nömrələrini yaz, məsələn: [[S:1,3]]. NO_ANSWER halında bunu yazma.
-Ton: ${p.tone ?? "dostcasına, peşəkar"}.${p.extraInstructions ? "\n" + p.extraInstructions : ""}${privatePrompt(tenant, identity)}${sid ? actionsPrompt(tenant, identity) : ""}${procedurePrompt(proc)}`;
+${styleLines(p, "dostcasına, peşəkar")}${p.extraInstructions ? "\n" + p.extraInstructions : ""}${privatePrompt(tenant, identity)}${sid ? actionsPrompt(tenant, identity) : ""}${procedurePrompt(proc)}`;
 }
 
 export const header = (c) => [c.title, c.heading].filter(Boolean).join(" — ");

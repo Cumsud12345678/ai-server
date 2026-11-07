@@ -52,3 +52,14 @@ test("identity secret məlumat mənbəsiz yaradılır və müştəri məlumatı 
   view = (await call("GET", `/v1/service/tenants/${id}/private-data`)).body;
   assert.equal(view.identity.configured, true, "girişli əməliyyatlar üçün açar qalmalıdır");
 });
+
+test("profil: cavab uzunluğu və köməkçinin adı saxlanır, prompt-a düşür; səhv dəyər rədd olunur", async () => {
+  const { styleLines } = await import("../src/ai/style.js");
+  const created = await call("POST", "/v1/service/tenants", { businessName: "Üslub", domain: "u.az", profile: { mode: "support", answerLength: "short", agentName: "Aysel" } });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  const bad = await call("POST", "/v1/service/tenants", { businessName: "X", domain: "x.az", profile: { mode: "support", answerLength: "huge" } });
+  assert.equal(bad.status, 400);
+  const s = styleLines({ tone: "rəsmi", agentName: "Aysel", answerLength: "short" });
+  assert.match(s, /Ton: rəsmi/); assert.match(s, /Aysel/); assert.match(s, /qısa/);
+  assert.equal(styleLines({}), "Ton: dostcasına.");
+});

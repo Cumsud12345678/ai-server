@@ -30,6 +30,7 @@ import { answerFromKb } from "./kb/answer.js";
 import { draftReply, validDraftInput } from "./kb/draft.js";
 import { registerKbRoutes } from "./kb/routes.js";
 import { deleteTenantKb } from "./kb/store.js";
+import { ANSWER_LENGTHS } from "./ai/style.js";
 
 const LANGS = ["az", "en", "ru", "tr"];
 const MODES = ["listings", "support", "both"];
@@ -101,6 +102,8 @@ function validateProfile(p) {
   if (p.generalKnowledge !== undefined && typeof p.generalKnowledge !== "boolean") return "profile.generalKnowledge true və ya false olmalıdır";
   if (p.imageSearch !== undefined && typeof p.imageSearch !== "boolean") return "profile.imageSearch true və ya false olmalıdır";
   if (p.kbAutoRefresh !== undefined && !["off", "daily", "weekly"].includes(p.kbAutoRefresh)) return "profile.kbAutoRefresh off, daily və ya weekly olmalıdır";
+  if (p.answerLength !== undefined && !ANSWER_LENGTHS.includes(p.answerLength)) return "profile.answerLength short, medium və ya long olmalıdır";
+  if (p.agentName !== undefined && (typeof p.agentName !== "string" || p.agentName.length > 40)) return "profile.agentName mətn olmalıdır (maksimum 40 simvol)";
   return null;
 }
 
@@ -116,6 +119,8 @@ function mergeProfile(prev = {}, input = {}, extra = {}) {
   if (input.generalKnowledge !== undefined) next.generalKnowledge = input.generalKnowledge;
   if (input.imageSearch !== undefined) next.imageSearch = input.imageSearch;
   if (input.kbAutoRefresh !== undefined) next.kbAutoRefresh = input.kbAutoRefresh;
+  if (input.answerLength !== undefined) next.answerLength = input.answerLength;
+  if (input.agentName !== undefined) next.agentName = input.agentName.replace(/[\u0000-\u001f"]/g, " ").trim();
   next.language ??= "az";
   next.mode ??= "listings";
   next.maxResults ??= 5;
