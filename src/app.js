@@ -22,6 +22,7 @@ import { FEED_MAX_BYTES } from "./connectors/feedParse.js";
 import { feedMeta, loadItems, refreshFeed, validateFeedSource } from "./connectors/feedService.js";
 import { deleteFeed, putFeed } from "./connectors/feedStore.js";
 import { validateFieldSpecs } from "./connectors/mapper.js";
+import { fetchSample, validateSampleRequest } from "./connectors/sample.js";
 import { fetchPrivate, newIdentitySecret, preparePrivateData, privateView, validatePrivateData, verifyIdentity } from "./private/privateData.js";
 import { encryptSecret } from "./tenants/secretCrypto.js";
 import { actionsView, decideAction, newSigningSecret, prepareActions, testAction, validateActions } from "./actions/actions.js";
@@ -211,6 +212,14 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
     } catch (err) {
       res.status(422).json({ ok: false, error: err.message, code: err.code ?? "CONFIG_TEST_FAILED" });
     }
+  });
+
+  // Qoşulma sehirbazı: API ünvanının xam cavabı (sahələri tanımaq üçün)
+  app.post("/v1/service/config/sample", serviceAuth, async (req, res) => {
+    const error = validateSampleRequest(req.body ?? {});
+    if (error) return res.status(400).json({ error });
+    try { res.json({ ok: true, ...(await fetchSample(req.body)) }); }
+    catch (err) { res.status(422).json({ ok: false, error: err.message, code: err.code ?? "SAMPLE_FAILED" }); }
   });
 
   app.post("/v1/service/tenants", serviceAuth, async (req, res) => {

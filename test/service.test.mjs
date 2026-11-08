@@ -142,3 +142,16 @@ test("DELETE müştəri: açar işləmir, ikinci dəfə 404, servis tokeni olmad
   assert.equal((await fetch(`${base}/v1/usage`, { headers: { authorization: `Bearer ${apiKey}` } })).status, 401);
   assert.equal((await call("DELETE", `/v1/service/tenants/${tenantId}`)).status, 404);
 });
+
+test("config/sample: API-nin xam cavabını gətirir, açar cavaba düşmür, səhv sorğu 400", async () => {
+  const src = config.source;
+  const url = new URL(src.search.path, src.baseUrl).toString();
+  const { status, body } = await json(await call("POST", "/v1/service/config/sample", { url, auth: { type: "header", name: "X-Api-Key" }, apiSecret: "test-secret" }));
+  assert.equal(status, 200, JSON.stringify(body));
+  assert.ok(body.ok && body.json && typeof body.ms === "number");
+  assert.ok(!JSON.stringify(body).includes("test-secret"));
+  assert.equal((await call("POST", "/v1/service/config/sample", { url: "" })).status, 400);
+  assert.equal((await call("POST", "/v1/service/config/sample", { url, auth: { type: "bearer" } })).status, 400, "açarsız bearer");
+  const bad = await json(await call("POST", "/v1/service/config/sample", { url: "https://127.0.0.1/x" }));
+  assert.equal(bad.status, 422);
+});
