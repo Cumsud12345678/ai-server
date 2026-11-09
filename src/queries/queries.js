@@ -64,6 +64,8 @@ const listingBrief = (l) => ({
   ...(Number.isFinite(l.price) && { price: l.price }), ...(l.currency && { currency: String(l.currency).slice(0, 8) }),
   ...(typeof l.url === "string" && /^https?:\/\//.test(l.url) && { url: l.url.slice(0, 500) }),
   ...(typeof l.image === "string" && /^https?:\/\//.test(l.image) && { image: l.image.slice(0, 500) }),
+  // Paneldə kart vidjetdəki kimi görünsün: il və yürüş
+  ...(Number.isFinite(l.year) && { year: l.year }), ...(Number.isFinite(l.mileage) && { mileage: l.mileage }),
 });
 const view = (d) => ({ id: d._id, at: new Date(d.at).toISOString(), ...(d.sid && { sid: d.sid }), message: d.message, results: d.results, tokens: d.tokens, cached: d.cached, error: d.error, costAzn: d.costAzn ?? null });
 const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
