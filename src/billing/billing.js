@@ -233,6 +233,20 @@ export async function resolveRequest(id, action, by = "") {
   throw Object.assign(new Error("action approve və ya reject olmalıdır"), { status: 400 });
 }
 
+// Platforma üzrə son 30 günün real orta qiyməti (bütün müştərilər): müştərinin öz tarixçəsi azdırsa təxmin üçün işlənir.
+// 10 dəqiqəlik keş: hər balans səhifəsi açılanda bütün günləri oxumasın.
+let platformAvg = { at: 0, micro: 0, requests: 0 };
+async function platformAvgMicro() {
+  if (Date.now() - platformAvg.at < 10 * 60_000) return platformAvg;
+  const rows = await store().listAllDays(daysAgo(30));
+  const t = rows.reduce((a, d) => ({ billed: a.billed + (d.billed ?? 0), requests: a.requests + (d.requests ?? 0) }), { billed: 0, requests: 0 });
+  platformAvg = { at: Date.now(), micro: t.requests > 0 && t.billed > 0 ? t.billed / t.requests : 0, requests: t.requests };
+  return platformAvg;
+}
+export const _resetPlatformAvg = () => { platformAvg = { at: 0, micro: 0, requests: 0 }; };
+// Müştərinin öz ortası bu qədər sorğudan sonra etibarlı sayılır
+const OWN_AVG_MIN_REQUESTS = 20;
+
 /** Panel üçün tam görüntü: qalıq, xərc, orta sorğu, proqnoz, son əməliyyatlar. */
 export async function summary(tenantId, { admin = false, history = true } = {}) {
   const st = store();
@@ -255,6 +269,14 @@ export async function summary(tenantId, { admin = false, history = true } = {}) 
       monthAzn: fromMicro(thisMonth.billed), monthRequests: thisMonth.requests,
       last30Azn: fromMicro(last30.billed), last30Requests: last30.requests,
       avgPerRequestAzn: avg ? fromMicro(avg) : null, defaultAvgAzn: config.defaultAvgAzn(),
+      // Təxmin üçün mesaj qiyməti: müştərinin öz real ortası (kifayət qədər sorğu varsa), yoxsa bütün platformanın real ortası, o da yoxdursa standart
+      ...(await (async () => {
+        if (avg && last30.requests >= OWN_AVG_MIN_REQUESTS) return { estimateAzn: fromMicro(avg), estimateSource: "own", estimateRequests: last30.requests };
+        const p = await platformAvgMicro().catch(() => ({ micro: 0, requests: 0 }));
+        if (p.micro) return { estimateAzn: fromMicro(p.micro), estimateSource: "platform", estimateRequests: p.requests };
+        if (avg) return { estimateAzn: fromMicro(avg), estimateSource: "own", estimateRequests: last30.requests };
+        return { estimateAzn: config.defaultAvgAzn(), estimateSource: "default", estimateRequests: 0 };
+      })()),
       projectedMonthAzn: thisMonth.billed > 0 ? fromMicro((thisMonth.billed / dayOfMonth) * dim) : null,
     },
     pendingRequests: (await st.listReqs({ tenantId, status: "pending", limit: 5 })).map(publicReq),

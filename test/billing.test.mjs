@@ -3,7 +3,7 @@ import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { tmpFile } from "../testkit/helpers.mjs";
 import { callCostUsd, billedMicro, newMeter, toMicro, fromMicro } from "../src/billing/pricing.js";
-import { canSpend, charge, topup, summary, setSettings, requestTopup, resolveRequest, listRequests } from "../src/billing/billing.js";
+import { canSpend, charge, topup, summary, _resetPlatformAvg, setSettings, requestTopup, resolveRequest, listRequests } from "../src/billing/billing.js";
 import { resetStores, store } from "../src/billing/storage.js";
 import { useStoreDb } from "../src/store/mongo.js";
 import { fakeMongo } from "./helpers/fakeMongo.mjs";
@@ -128,6 +128,21 @@ for (const [mode, setup] of Object.entries(modes)) {
     process.env.BILLING_FREE_PERIOD = "once";
     s = await summary(t.tenantId);
     assert.equal(s.balance.freeAzn, 0.1, "once: yenilənmir");
+  });
+
+  test(`[${mode}] mesaj təxmini real ortadan: tarixçə yoxdursa platformanın ortası, 20+ sorğudan sonra öz ortası`, async () => {
+    setup(); _resetPlatformAvg();
+    const empty = await summary(fresh());
+    assert.equal(empty.spend.estimateSource, "default", "heç kimdə tarixçə yoxdur");
+    const busy = T(fresh());
+    for (let i = 0; i < 25; i++) await charge(busy, { costUsd: 0.002 });
+    _resetPlatformAvg();
+    const newcomer = await summary(fresh());
+    assert.equal(newcomer.spend.estimateSource, "platform");
+    assert.equal(newcomer.spend.estimateAzn, fromMicro(billedMicro(0.002)));
+    const own = await summary(busy.tenantId);
+    assert.equal(own.spend.estimateSource, "own");
+    assert.equal(own.spend.estimateAzn, own.spend.avgPerRequestAzn);
   });
 
   test(`[${mode}] 60 paralel sorğu: heç bir xərc itmir`, async () => {
