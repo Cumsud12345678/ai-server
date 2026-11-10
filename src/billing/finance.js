@@ -6,7 +6,8 @@
 //   billed   — istifadəyə görə müştəriyə yazılan məbləğ (vuruq daxil)
 //   free     — billed-in pulsuz aylıq hissədən çıxılan hissəsi (gəlir deyil). Bu sahə yeni yazılır: köhnə günlərdə 0-dır
 //   cost     — provayderə (Claude/Gemini) ödənən real xərc, vuruqsuz
-//   profit   — (billed − free) − cost
+//   expired  — müddəti bitib yanan yüklənmiş balans (pul artıq daxil olub, xidmət göstərilməyib: gəlirə yazılır)
+//   profit   — (billed − free + expired) − cost
 import { config, fromMicro } from "./pricing.js";
 import { store } from "./storage.js";
 
@@ -29,11 +30,13 @@ export async function finance({ months = 6 } = {}) {
   const st = store();
   const [ledger, days, models, accounts] = await Promise.all([st.listAllLedger(), st.listAllDays(`${keys[0]}-01`), st.listModels(keys[0]), st.listAccounts()]);
 
-  const blank = () => ({ paid: 0, manual: 0, adjust: 0, billed: 0, free: 0, cost: 0, requests: 0 });
+  const blank = () => ({ paid: 0, manual: 0, adjust: 0, billed: 0, free: 0, cost: 0, requests: 0, expired: 0 });
   const byMonth = new Map(keys.map((k) => [k, blank()]));
   let cashIn = 0;
   for (const e of ledger) {
     const amount = Number(e.amount) || 0;
+    // Müddəti bitən balans pul çıxışı deyil: kassaya təsir etmir, həmin ayın gəlirinə yazılır
+    if (e.type === "expire") { const r = byMonth.get(monthOf(e.at)); if (r) r.expired += -amount; continue; }
     cashIn += amount;
     const row = byMonth.get(monthOf(e.at));
     if (!row) continue;
@@ -57,11 +60,11 @@ export async function finance({ months = 6 } = {}) {
   const accById = new Map(accounts.map((a) => [a._id, a]));
   const monthRows = keys.map((k) => {
     const r = byMonth.get(k);
-    const revenue = r.billed - r.free;
+    const revenue = r.billed - r.free + r.expired;
     return {
       month: k,
       cashIn: { paidAzn: azn(r.paid), manualAzn: azn(r.manual), adjustAzn: azn(r.adjust), totalAzn: azn(r.paid + r.manual + r.adjust) },
-      billedAzn: azn(r.billed), freeAzn: azn(r.free), revenueAzn: azn(revenue), costAzn: azn(r.cost), profitAzn: azn(revenue - r.cost),
+      billedAzn: azn(r.billed), freeAzn: azn(r.free), expiredAzn: azn(r.expired), revenueAzn: azn(revenue), costAzn: azn(r.cost), profitAzn: azn(revenue - r.cost),
       marginPct: revenue > 0 ? Math.round(((revenue - r.cost) / revenue) * 1000) / 10 : null,
       requests: r.requests,
     };

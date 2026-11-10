@@ -1,4 +1,5 @@
 import { exactAnswer } from "./kb/qa.js";
+import { providerIssues } from "./ai/provider-status.js";
 import { listChunks } from "./kb/store.js";
 import { searchKb } from "./kb/search.js";
 import { transcribeAudio, validateAudio } from "./ai/transcribe.js";
@@ -190,6 +191,10 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
     if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return res.status(401).json({ error: "Servis icazəsi yoxdur" });
     next();
   };
+
+  // Claude/Gemini hesab problemləri (balans bitib, limit, açar səhvdir). Portal hər 2 dəqiqədən bir oxuyur və adminə xəbər göndərir.
+  // Yalnız servis tokeni ilə: xəta mətnləri ictimai /health-də görünməsin.
+  app.get("/v1/service/providers", serviceAuth, (req, res) => res.json({ providers: providerIssues() }));
 
   // :tenantId yalnız portal vasitəsilə yaradılmış müştəri ola bilər (dev tenant-lar yox).
   const customerTenant = (req, res, next) => {

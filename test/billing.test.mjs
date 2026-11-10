@@ -17,7 +17,7 @@ const modes = {
 };
 
 beforeEach(() => {
-  for (const k of ["BILLING_MARKUP", "USD_AZN_RATE", "BILLING_FREE_AZN", "BILLING_FREE_PERIOD", "BILLING_LOW_AZN", "BILLING_ENFORCE", "GEMINI_PRICES", "BILLING_MIN_TOPUP_AZN"]) delete process.env[k];
+  for (const k of ["BILLING_TOPUP_EXPIRY_DAYS", "BILLING_MARKUP", "USD_AZN_RATE", "BILLING_FREE_AZN", "BILLING_FREE_PERIOD", "BILLING_LOW_AZN", "BILLING_ENFORCE", "GEMINI_PRICES", "BILLING_MIN_TOPUP_AZN"]) delete process.env[k];
   // testlər Gemini qiymət cədvəli ilə yazılıb (defolt indi Haiku tarifidir)
   process.env.GEMINI_PRICES = JSON.stringify({ "gemini-3.5-flash": { in: 1.5, out: 9, cachedIn: 0.15 }, "gemini-3-flash-preview": { in: 0.5, out: 3, cachedIn: 0.05 }, "*": { in: 1.5, out: 9, cachedIn: 0.15 } });
 });
@@ -192,5 +192,78 @@ for (const [mode, setup] of Object.entries(modes)) {
     const pub = await summary(t.tenantId);
     assert.equal(pub.admin, undefined, "müştəriyə vuruq göstərilmir");
     await assert.rejects(setSettings(t.tenantId, { markup: 0.5 }), /Vuruq/);
+  });
+
+  test(`[${mode}] hər yükləmənin öz müddəti var: xərc bitməyə yaxın partiyadan çıxılır, vaxtı keçən qalıq yanır, yeni yükləmə qalır`, async () => {
+    setup();
+    process.env.BILLING_FREE_AZN = "0";
+    const id = fresh();
+    await topup(id, 5, { ref: "pay:a" });
+    await topup(id, 5, { ref: "pay:b" });
+    let s = await summary(id);
+    assert.equal(s.lots.length, 2);
+    assert.equal(s.expiryDays, 365);
+    const yearMs = Date.parse(s.lots[0].expiresAt) - Date.parse(s.lots[0].at);
+    assert.equal(Math.round(yearMs / 86_400_000), 365);
+    // birinci partiyanı "11 ay əvvəl alınmış" edirik: bitməsinə az qalıb
+    const st = store();
+    let acc = await st.getAcc(id);
+    const soon = new Date(Date.now() + 60_000).toISOString();
+    await st.casAcc(id, acc.v, { lots: acc.lots.map((l) => (l.id === "pay:a" ? { ...l, exp: soon } : l)) });
+    // xərc bitməyə ən yaxın (birinci) partiyadan çıxılır
+    await charge(T(id), { costUsd: 0.4 }); // 0.4 × 2.55 = 1.02 AZN
+    s = await summary(id);
+    assert.equal(s.lots[0].leftAzn, 3.98);
+    assert.equal(s.lots[1].leftAzn, 5);
+    // vaxt keçdi: birincinin qalığı yanır, ikinci qalır
+    acc = await st.getAcc(id);
+    await st.casAcc(id, acc.v, { lots: acc.lots.map((l) => (l.id === "pay:a" ? { ...l, exp: new Date(Date.now() - 1000).toISOString() } : l)) });
+    s = await summary(id);
+    assert.equal(s.balance.paidAzn, 5);
+    assert.equal(s.lots.length, 1);
+    const exp = s.ledger.find((e) => e.type === "expire");
+    assert.ok(exp, "jurnala yazılır");
+    assert.equal(exp.amountAzn, -3.98);
+    // təkrar oxuma ikinci dəfə yandırmır
+    s = await summary(id);
+    assert.equal(s.balance.paidAzn, 5);
+    assert.equal(s.ledger.filter((e) => e.type === "expire").length, 1);
+  });
+
+  test(`[${mode}] köhnə hesab: partiyasız balans bir partiya olur (müddət indidən), mənfi düzəliş və kredit borcu partiyalara düzgün düşür`, async () => {
+    setup();
+    process.env.BILLING_FREE_AZN = "0";
+    const id = fresh();
+    await summary(id);
+    const st = store();
+    let acc = await st.getAcc(id);
+    await st.casAcc(id, acc.v, { paid: toMicro(7), lots: null }); // köhnə sənəddə lots sahəsi yoxdur
+    let s = await summary(id);
+    assert.equal(s.lots.length, 1);
+    assert.equal(s.lots[0].leftAzn, 7);
+    await topup(id, -2, { note: "düzəliş" });
+    s = await summary(id);
+    assert.equal(s.lots[0].leftAzn, 5);
+    // kredit limiti ilə mənfiyə düşür, sonra yükləmə əvvəl borcu bağlayır
+    await setSettings(id, { creditLimitAzn: 10 });
+    await charge(T(id), { costUsd: 3 }); // 7.65 AZN → paid = -2.65
+    s = await summary(id);
+    assert.equal(s.balance.paidAzn, -2.65);
+    assert.equal(s.lots.length, 0);
+    await topup(id, 10, { ref: "pay:c" });
+    s = await summary(id);
+    assert.equal(s.balance.paidAzn, 7.35);
+    assert.equal(s.lots.length, 1);
+    assert.equal(s.lots[0].leftAzn, 7.35, "qalıq = paid");
+  });
+
+  test(`[${mode}] BILLING_TOPUP_EXPIRY_DAYS=0: müddətsiz`, async () => {
+    setup();
+    process.env.BILLING_TOPUP_EXPIRY_DAYS = "0";
+    const id = fresh();
+    await topup(id, 5, { ref: "pay:z" });
+    const s = await summary(id);
+    assert.equal(s.lots[0].expiresAt, null);
+    assert.equal(s.expiryDays, 0);
   });
 }

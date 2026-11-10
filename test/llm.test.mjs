@@ -91,3 +91,29 @@ test("Claude yüklüdürsə (529) və ya açar yoxdursa Gemini-yə keçir", asyn
     assert.equal((await client.models.generateContent({ model: "gemini-3.5-flash-lite", contents: [] })).text, "gemini:gemini-3.5-flash-lite");
   } finally { srv.close(); delete process.env.ANTHROPIC_BASE_URL; delete process.env.ANTHROPIC_API_KEY; }
 });
+
+test("provayder hesabı: Claude balansı bitəndə (400) Gemini-yə keçir və problem qeydə alınır; Gemini billing xətası da ötürülür; uğur təmizləyir", async () => {
+  const { providerIssues, _resetProviderIssues, classify } = await import("../src/ai/provider-status.js");
+  _resetProviderIssues();
+  const { srv, url } = await fakeAnthropic(() => [400, { type: "error", error: { type: "invalid_request_error", message: "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits." } }]);
+  process.env.ANTHROPIC_BASE_URL = url; process.env.ANTHROPIC_API_KEY = "k";
+  try {
+    let geminiFail = null;
+    const gemini = { models: { generateContent: async () => { if (geminiFail) throw geminiFail; return { text: "ok" }; } } };
+    const client = hybridClient(() => gemini);
+    await assert.rejects(client.models.generateContent({ model: "claude-haiku-5-5", contents: [{ role: "user", parts: [{ text: "x" }] }] }), (e) => e.status === 404, "növbəti modelə keçsin");
+    assert.equal(providerIssues().claude.kind, "balance");
+    geminiFail = Object.assign(new Error("[403] Billing account for project is disabled"), { status: 403 });
+    await assert.rejects(client.models.generateContent({ model: "gemini-3.5-flash-lite", contents: [] }), (e) => e.status === 404);
+    assert.equal(providerIssues().gemini.kind, "balance");
+    geminiFail = null;
+    await client.models.generateContent({ model: "gemini-3.5-flash-lite", contents: [] });
+    assert.equal(providerIssues().gemini, undefined, "uğurlu sorğu təmizləyir");
+    // tək-tük 429 xəbərdarlıq deyil, 5+ dəfə təkrar olanda görünür
+    for (let i = 0; i < 4; i++) { geminiFail = Object.assign(new Error("RESOURCE_EXHAUSTED"), { status: 429 }); await client.models.generateContent({ model: "gemini-3.5-flash-lite", contents: [] }).catch(() => {}); }
+    assert.equal(providerIssues().gemini, undefined);
+    await client.models.generateContent({ model: "gemini-3.5-flash-lite", contents: [] }).catch(() => {});
+    assert.equal(providerIssues().gemini.kind, "quota");
+    assert.equal(classify("claude", { status: 400, message: "messages: field required" }), null, "adi 400 hesab problemi deyil");
+  } finally { srv.close(); delete process.env.ANTHROPIC_BASE_URL; delete process.env.ANTHROPIC_API_KEY; _resetProviderIssues(); }
+});

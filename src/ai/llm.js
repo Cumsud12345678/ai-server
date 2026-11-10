@@ -13,6 +13,7 @@
 //   CLAUDE_THINKING         off (defolt) = düşünmə söndürülür (ucuz və sürətli); auto = modelin öz defoltu
 //   CLAUDE_PROMPT_CACHE     1 = sistem təlimatı və alətlər keşlənir (eyni müştəriyə 5 dəqiqədə çox sorğu gələndə sərfəlidir)
 import { GoogleGenAI } from "@google/genai";
+import { classify, recordFailure, recordSuccess } from "./provider-status.js";
 
 export const DEFAULT_CHAT_MODELS = "claude-haiku-5-5,gemini-3.5-flash-lite";
 /** Çat/şəkil/qaralama üçün model sırası. Köhnə GEMINI_MODELS də oxunur (AI_MODELS yoxdursa). */
@@ -145,8 +146,9 @@ async function callClaude(params) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const e = new Error(`Claude ${res.status}: ${data?.error?.message ?? res.statusText}`);
-    // 529 (yüklüdür) mövcud təkrar cəhd məntiqinə 503 kimi düşür; 401/403 (açar səhvdir) → Gemini-yə keçsin, bot dayanmasın
-    e.status = res.status === 529 ? 503 : [401, 403].includes(res.status) ? 404 : res.status;
+    // 529 (yüklüdür) mövcud təkrar cəhd məntiqinə 503 kimi düşür; 401/403 (açar səhvdir) və balans/limit bitməsi (400) → Gemini-yə keçsin, bot dayanmasın
+    const acct = classify("claude", { status: res.status, message: e.message });
+    e.status = res.status === 529 ? 503 : [401, 403].includes(res.status) || acct === "balance" || acct === "limit" ? 404 : res.status;
     if ([401, 403].includes(res.status)) console.error("[claude] açar qəbul olunmadı (401/403): ANTHROPIC_API_KEY-i yoxla");
     throw e;
   }
@@ -154,11 +156,28 @@ async function callClaude(params) {
 }
 
 // ---------- hibrid müştəri ----------
+/**
+ * Provayder hesabının vəziyyətini izləyir (balans bitdi, limit, açar səhvi). Gemini-də balans/açar xətası (400/403)
+ * adi halda növbəti modelə keçmir: onu 404 edirik ki, sıradakı Claude işə düşsün və bot dayanmasın.
+ */
+async function track(provider, fn) {
+  try {
+    const r = await fn();
+    recordSuccess(provider);
+    return r;
+  } catch (err) {
+    const kind = recordFailure(provider, err);
+    if (provider === "gemini" && (kind === "balance" || kind === "limit" || kind === "auth") && err && typeof err === "object") {
+      try { err.status = 404; } catch { /* yalnız oxunan sahə */ }
+    }
+    throw err;
+  }
+}
 export function hybridClient(gemini) {
   return {
     models: {
-      generateContent: (params) => (isClaude(params.model) ? callClaude(params) : gemini().models.generateContent(params)),
-      embedContent: (params) => gemini().models.embedContent(params),
+      generateContent: (params) => track(isClaude(params.model) ? "claude" : "gemini", () => (isClaude(params.model) ? callClaude(params) : gemini().models.generateContent(params))),
+      embedContent: (params) => track("gemini", () => gemini().models.embedContent(params)),
     },
   };
 }

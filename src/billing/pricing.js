@@ -80,6 +80,8 @@ export const config = {
   usdAzn: () => envNum("USD_AZN_RATE", 1.7),            // AZN dollara sabitlənib
   freeAzn: () => envNum("BILLING_FREE_AZN", 2),          // pulsuz məbləğ (müştəriyə yazılan manatla)
   freePeriod: () => (process.env.BILLING_FREE_PERIOD === "once" ? "once" : "monthly"),
+  // Yüklənmiş balansın istifadə müddəti (gün): hər yükləmənin öz müddəti var, xərclənməyən hissə sonra yanır. 0 = müddətsiz
+  topupExpiryDays: () => Math.max(0, Math.round(envNum("BILLING_TOPUP_EXPIRY_DAYS", 365))),
   lowAzn: () => envNum("BILLING_LOW_AZN", 1),            // "balans azalır" xəbərdarlığı həddi
   minTopupAzn: () => envNum("BILLING_MIN_TOPUP_AZN", 10),
   maxTopupAzn: () => envNum("BILLING_MAX_TOPUP_AZN", 1000),

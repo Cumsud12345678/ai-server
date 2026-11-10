@@ -1,6 +1,10 @@
 // Müştəri balansı: pulsuz aylıq məbləğ + yüklənmiş balans. Hər sorğunun real Gemini xərci (dollar → manat) vuruq əmsalı ilə
 // əvvəl pulsuz hissədən, sonra yüklənmiş balansdan çıxılır. Balans (və kredit limiti) bitəndə sorğu dayanır.
 // Bütün məbləğlər mikro-manatla (1 AZN = 1 000 000), tam ədəd kimi saxlanır: kəsr xətası yığılmır.
+//
+// Yüklənmiş balans "partiyalar"la (lots) saxlanır: hər yükləmənin öz bitmə tarixi var (BILLING_TOPUP_EXPIRY_DAYS, defolt 365).
+// Xərc əvvəl pulsuz hissədən, sonra bitməyə ən yaxın partiyadan çıxılır. Müddəti bitən partiyanın qalığı yanır
+// (jurnala "expire" yazılır). Qayda: partiyaların qalıqları cəmi = max(0, paid). Kredit limiti ilə paid mənfi ola bilər.
 import { randomUUID } from "node:crypto";
 import { MICRO, billedMicro, config, fromMicro, toMicro } from "./pricing.js";
 import { store } from "./storage.js";
@@ -12,11 +16,46 @@ const MAX_TRIES = 60;
 // Rəqabət olanda (eyni müştəriyə eyni anda çox sorğu) bir neçə uğursuz cəhddən sonra təsadüfi gözləmə: növbə dağılır
 const backoff = (i) => (i < 3 ? Promise.resolve() : new Promise((r) => setTimeout(r, Math.random() * Math.min(40, 2 * i))));
 
+// ---- Partiyalar ----
+const expiryOf = (fromMs = Date.now()) => { const d = config.topupExpiryDays(); return d > 0 ? new Date(fromMs + d * 86_400_000).toISOString() : null; };
+/** Bitməyə ən yaxın partiya birinci (müddətsizlər sonda) */
+const byExpiry = (a, b) => (a.exp ?? "9999") < (b.exp ?? "9999") ? -1 : (a.exp ?? "9999") > (b.exp ?? "9999") ? 1 : a.at < b.at ? -1 : 1;
+/** Partiyaları paid-ə uyğunlaşdırır: artıq qalıq bitməyə ən yaxın partiyadan çıxılır, sıfırlananlar atılır. */
+function fitLots(lots, paid) {
+  const out = (lots ?? []).map((l) => ({ ...l })).sort(byExpiry);
+  let extra = out.reduce((s, l) => s + l.left, 0) - Math.max(0, paid);
+  for (const l of out) { if (extra <= 0) break; const take = Math.min(l.left, extra); l.left -= take; extra -= take; }
+  return out.filter((l) => l.left > 0);
+}
+
 async function ensure(tenantId) {
   const st = store();
   let acc = await st.getAcc(tenantId);
   if (!acc) {
-    await st.createAcc({ _id: tenantId, free: toMicro(config.freeAzn()), freeMonth: month(), paid: 0, creditLimit: 0, markup: null, spent: 0, notified: { low: false, empty: false }, v: 0, createdAt: new Date().toISOString() });
+    await st.createAcc({ _id: tenantId, free: toMicro(config.freeAzn()), freeMonth: month(), paid: 0, lots: [], creditLimit: 0, markup: null, spent: 0, notified: { low: false, empty: false }, v: 0, createdAt: new Date().toISOString() });
+    acc = await st.getAcc(tenantId);
+  }
+  // Köhnə hesab (partiyasız): mövcud yüklənmiş balans bir partiya olur, müddət bu andan sayılır (müştəri itirmir)
+  if (!Array.isArray(acc.lots)) {
+    const lots = acc.paid > 0 ? [{ id: "legacy", amount: acc.paid, left: acc.paid, at: new Date().toISOString(), exp: expiryOf() }] : [];
+    if (await st.casAcc(tenantId, acc.v, { lots })) acc = { ...acc, lots, v: acc.v + 1 };
+    else acc = await st.getAcc(tenantId);
+  }
+  // Müddəti bitən partiyalar yanır
+  const now = new Date().toISOString();
+  for (let i = 0; i < MAX_TRIES && (acc.lots ?? []).some((l) => l.exp && l.exp <= now && l.left > 0); i++) {
+    const dead = acc.lots.filter((l) => l.exp && l.exp <= now && l.left > 0);
+    const burned = dead.reduce((s, l) => s + l.left, 0);
+    const lots = acc.lots.filter((l) => !dead.includes(l));
+    const paid = acc.paid - burned;
+    if (await st.casAcc(tenantId, acc.v, { paid, lots })) {
+      for (const l of dead) {
+        await addLedger({ ref: `expire:${tenantId}:${l.id}`, tenantId, type: "expire", amount: -l.left, note: `Müddəti bitdi: ${l.at.slice(0, 10)} tarixli yükləmənin istifadə olunmayan hissəsi`, by: "system" }).catch(() => {});
+      }
+      acc = { ...acc, paid, lots, v: acc.v + 1 };
+      break;
+    }
+    await backoff(i);
     acc = await st.getAcc(tenantId);
   }
   // Aylıq yenilənən pulsuz məbləğ: yığılmır, hər ay təzədən başlayır
@@ -90,13 +129,14 @@ export async function charge(tenant, { costUsd = 0, tokens = 0, requests = 1 } =
     const fromFree = Math.min(acc.free, billed);
     const free = acc.free - fromFree;
     const paid = acc.paid - (billed - fromFree);
+    const lots = fitLots(acc.lots, paid);
     const after = { ...acc, free, paid };
     const state = stateOf(after);
     const notified = { ...(acc.notified ?? {}) };
     let notify;
     if (state === "empty" && !notified.empty) { notified.empty = true; notified.low = true; notify = "empty"; }
     else if (state === "low" && !notified.low) { notified.low = true; notify = "low"; }
-    if (await st.casAcc(tenantId, acc.v, { free, paid, spent: (acc.spent ?? 0) + billed, notified })) {
+    if (await st.casAcc(tenantId, acc.v, { free, paid, lots, spent: (acc.spent ?? 0) + billed, notified })) {
       // Pulsuz hissədən çıxılan məbləğ gəlir deyil: maliyyə hesabatında ayrıca göstərilir
       if (fromFree > 0) await st.incDay(tenantId, today(), { free: fromFree }).catch(() => {});
       return { billedAzn: fromMicro(billed), balanceAzn: fromMicro(free + paid), state, ...(notify && { notify }) };
@@ -108,7 +148,7 @@ export async function charge(tenant, { costUsd = 0, tokens = 0, requests = 1 } =
   console.error(`[billing] ${tenantId}: CAS tükəndi, xərc ehtiyat yolla yazıldı (${billed} µAZN)`);
   const a = await st.getAcc(tenantId);
   const fromFree = Math.min(a.free, billed);
-  await st.casAcc(tenantId, a.v, { free: a.free - fromFree, paid: a.paid - (billed - fromFree), spent: (a.spent ?? 0) + billed });
+  await st.casAcc(tenantId, a.v, { free: a.free - fromFree, paid: a.paid - (billed - fromFree), lots: fitLots(a.lots, a.paid - (billed - fromFree)), spent: (a.spent ?? 0) + billed });
   if (fromFree > 0) await st.incDay(tenantId, today(), { free: fromFree }).catch(() => {});
   return { billedAzn: fromMicro(billed), balanceAzn: fromMicro(a.free + a.paid - billed), state: "ok" };
 }
@@ -129,12 +169,16 @@ export async function topup(tenantId, amountAzn, { note = "", by = "", ref, type
   await ensure(tenantId);
   const fresh = await addLedger({ tenantId, type: type ?? (micro > 0 ? "topup" : "adjust"), amount: micro, note: String(note).slice(0, 200), by: String(by).slice(0, 80), ...(ref && { ref: String(ref).slice(0, 120) }) });
   if (!fresh) return { duplicate: true, ...(await summary(tenantId)) };
+  // Müsbət məbləğ yeni partiya açır (öz bitmə tarixi ilə); mənfi düzəliş bitməyə ən yaxın partiyadan çıxılır.
+  // Kredit limiti borcu varsa yeni pul əvvəlcə borcu bağlayır (fitLots partiyanı paid-ə uyğunlaşdırır).
+  const at = new Date().toISOString();
   for (let i = 0; i < MAX_TRIES; i++) {
     const acc = await st.getAcc(tenantId);
     const paid = acc.paid + micro;
+    const lots = fitLots(micro > 0 ? [...(acc.lots ?? []), { id: String(ref ?? randomUUID()).slice(0, 120), amount: micro, left: micro, at, exp: expiryOf(Date.parse(at)) }] : acc.lots, paid);
     const after = { ...acc, paid };
     const notified = stateOf(after) === "ok" ? { low: false, empty: false } : stateOf(after) === "low" ? { low: true, empty: false } : acc.notified;
-    if (await st.casAcc(tenantId, acc.v, { paid, notified })) break;
+    if (await st.casAcc(tenantId, acc.v, { paid, lots, notified })) break;
     await backoff(i);
   }
   return { duplicate: false, ...(await summary(tenantId)) };
@@ -202,10 +246,10 @@ export async function adminRequests(q = {}) {
   return { requests: rows.slice(0, o.limit).map(adminReq), nextBefore: rows.length > o.limit ? rows[o.limit - 1].at : null };
 }
 /** kind: payment = ödəniş şlüzü və ya təsdiqlənmiş sorğu, manual = admin əl ilə əlavə, adjust = mənfi düzəliş */
-const ledgerKind = (e) => (e.amount < 0 ? "adjust" : String(e._id).startsWith("req:") || String(e._id).startsWith("pay:") ? "payment" : "manual");
+const ledgerKind = (e) => (e.type === "expire" ? "expire" : e.amount < 0 ? "adjust" : String(e._id).startsWith("req:") || String(e._id).startsWith("pay:") ? "payment" : "manual");
 export async function adminLedger(q = {}) {
   const o = pageOpts(q);
-  const kind = ["payment", "manual", "adjust"].includes(q.kind) ? q.kind : undefined;
+  const kind = ["payment", "manual", "adjust", "expire"].includes(q.kind) ? q.kind : undefined;
   // kind süzgəci yaddaşda tətbiq olunur: səhifə dolmaya bilər, ona görə bir az artıq oxunur
   const rows = await store().queryLedger({ ...o, limit: kind ? Math.min(2000, o.limit * 5) : o.limit + 1 });
   const filtered = kind ? rows.filter((e) => ledgerKind(e) === kind) : rows;
@@ -261,6 +305,9 @@ export async function summary(tenantId, { admin = false, history = true } = {}) 
   const avg = last30.requests > 0 && last30.billed > 0 ? last30.billed / last30.requests : 0;
   const out = {
     balance: { freeAzn: fromMicro(acc.free), paidAzn: fromMicro(acc.paid), totalAzn: fromMicro(acc.free + acc.paid) },
+    // Yüklənmiş balansın partiyaları: hər birinin qalığı və bitmə tarixi (bitməyə ən yaxın birinci)
+    lots: [...(acc.lots ?? [])].sort(byExpiry).map((l) => ({ amountAzn: fromMicro(l.amount), leftAzn: fromMicro(l.left), at: l.at, expiresAt: l.exp })),
+    expiryDays: config.topupExpiryDays(),
     state: stateOf(acc),
     allowance: { freeAzn: config.freeAzn(), period: config.freePeriod() },
     minTopupAzn: config.minTopupAzn(), maxTopupAzn: config.maxTopupAzn(), lowAzn: config.lowAzn(),
