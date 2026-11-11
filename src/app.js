@@ -26,6 +26,7 @@ import { validateFieldSpecs } from "./connectors/mapper.js";
 import { fetchSample, validateSampleRequest } from "./connectors/sample.js";
 import { fetchPrivate, newIdentitySecret, preparePrivateData, privateView, validatePrivateData, verifyIdentity } from "./private/privateData.js";
 import { encryptSecret } from "./tenants/secretCrypto.js";
+import { lookupOrder } from "./private/orderLookup.js";
 import { actionsView, decideAction, newSigningSecret, prepareActions, testAction, validateActions } from "./actions/actions.js";
 import { actionStats, clearActionLog, listActionLog } from "./actions/log.js";
 import { answerFromKb } from "./kb/answer.js";
@@ -457,6 +458,8 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
       const cleanSid = typeof sid === "string" && /^[\w.:-]{6,100}$/.test(sid) ? sid : null;
       const channel = !req.viaPortal ? "api" : ["widget", "telegram", "whatsapp"].includes(req.body?.channel) ? req.body.channel : "widget";
       const actionCtx = req.viaPortal && cleanSid && feats.actions !== false ? { sid: cleanSid, channel } : {};
+      // Girişsiz sifariş statusu (nömrə + telefon): "Müştəri məlumatı" ilə eyni plan imkanıdır
+      const lookup = feats.customerData !== false;
       // Şəkil əvvəl mətnə çevrilir; sonrakı axın dəyişməz qalır
       let vision = null;
       if (image) {
@@ -477,8 +480,8 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
       const r0 = qaHit
         ? { answer: qaHit.answer, listings: [], sources: [], tokens: 0, costUsd: 0, qa: true, searched: false }
         : support
-        ? await kbFn({ tenant: req.tenant, message: question, history: hist, identity, channel, orderSid: cleanSid, ...actionCtx })
-        : await adviseFn({ tenant: req.tenant, repo: await getRepo(req.tenant), message: question, history: hist, identity, channel, orderSid: cleanSid, ...actionCtx, live: Boolean(req.viaPortal && req.body?.live === true) });
+        ? await kbFn({ tenant: req.tenant, message: question, history: hist, identity, channel, orderSid: cleanSid, lookup, ...actionCtx })
+        : await adviseFn({ tenant: req.tenant, repo: await getRepo(req.tenant), message: question, history: hist, identity, channel, orderSid: cleanSid, lookup, ...actionCtx, live: Boolean(req.viaPortal && req.body?.live === true) });
       const r = vision ? { ...r0, tokens: (r0.tokens ?? 0) + vision.tokens, costUsd: (r0.costUsd ?? 0) + (vision.costUsd ?? 0) } : r0;
       mark("model");
       await addTokens(req.tenant, r.tokens);
@@ -601,6 +604,13 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
     await updateCustomerTenant(req.tenant.tenantId, (t) => { const { orderForm: _o, ...rest } = t; return rest; });
     refreshTenants();
     res.json({ ok: true });
+  });
+
+  // Sifariş axtarışının sınağı (panel): verilən nömrə və telefonla müştəri API-sini çağırır, nəticə maskalanmış sahələrlə
+  app.post("/v1/service/tenants/:tenantId/private-data/lookup-test", serviceAuth, customerTenant, async (req, res) => {
+    if (!req.tenant.privateData?.lookup) return res.status(400).json({ error: "Sifariş axtarışı qoşulmayıb", code: "NO_LOOKUP" });
+    const t = { ...req.tenant, privateData: { ...req.tenant.privateData, lookup: { ...req.tenant.privateData.lookup, enabled: true } } }; // söndürülüb olsa da sınamaq olsun
+    res.json(await lookupOrder(t, { orderId: req.body?.orderId, phone: req.body?.phone }, { sid: "panel-test" }));
   });
 
   // ---------- Əməliyyatlar (yazma: ləğv et, bilet yarat, rezerv et...) ----------

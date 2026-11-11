@@ -14,6 +14,7 @@ import { safeFetchJson, ConnectorError } from "../connectors/safeFetch.js";
 import { getPath, renderTemplate, coerce, stripHtml } from "../connectors/mapper.js";
 import { decryptSecret, encryptSecret } from "../tenants/secretCrypto.js";
 import { Type } from "@google/genai";
+import { validateLookup } from "./orderLookup.js";
 
 export const MAX_TOKEN_TTL_S = 3600;
 const SUB_RE = /^[\w.@:+-]{1,100}$/;
@@ -79,7 +80,9 @@ export function validatePrivateData(input, { secretAlreadyStored = false, apiSec
     if (["header", "query"].includes(auth.type) && !/^[A-Za-z0-9_-]{1,60}$/.test(String(auth.name ?? ""))) return "auth.name düzgün deyil";
     if (SECRET_AUTH.includes(auth.type) && !apiSecret && !secretAlreadyStored) return "API autentifikasiyası üçün apiSecret tələb olunur";
   }
-  if (!Array.isArray(sources) || !sources.length) return "Ən azı bir məlumat növü (sources) təyin edilməlidir";
+  if (input.lookup !== undefined) { const le = validateLookup(input.lookup); if (le) return le; }
+  // Mənbə olmadan da olar: yalnız "sifariş nömrəsi + telefon" axtarışı qoşula bilər
+  if (!Array.isArray(sources) || (!sources.length && !input.lookup)) return "Ən azı bir məlumat növü (sources) və ya sifariş axtarışı (lookup) təyin edilməlidir";
   if (sources.length > MAX_SOURCES) return `Ən çox ${MAX_SOURCES} məlumat növü ola bilər`;
   const seen = new Set();
   for (const [i, s] of sources.entries()) {
@@ -97,19 +100,26 @@ export function validatePrivateData(input, { secretAlreadyStored = false, apiSec
     if (s.path.replace(/\{userId\}/g, "").includes("{")) return `${w}.path-də yalnız {userId} yer tutucusu ola bilər`;
     if (typeof s.itemsPath !== "string" || s.itemsPath.length > 100) return `${w}.itemsPath tələb olunur (siyahının yolu; kökdədirsə boş sətir)`;
     for (const k of ["idField", "ownerField"]) if (s[k] !== undefined && (typeof s[k] !== "string" || !s[k] || s[k].length > 100)) return `${w}.${k} düzgün deyil`;
-    if (!s.fields || typeof s.fields !== "object" || Array.isArray(s.fields)) return `${w}.fields tələb olunur`;
-    const entries = Object.entries(s.fields);
-    if (!entries.length || entries.length > MAX_FIELDS) return `${w}.fields 1-${MAX_FIELDS} sahə olmalıdır`;
-    for (const [label, raw] of entries) {
-      if (!label.trim() || label.length > 40 || /[\u0000-\u001f<>]/.test(label)) return `${w}.fields: sahə adı düzgün deyil (maksimum 40 simvol)`;
-      const sp = typeof raw === "string" ? { path: raw } : raw;
-      if (!sp || typeof sp !== "object" || !(typeof sp.path === "string" || typeof sp.template === "string") || (sp.path ?? sp.template).length > 200) return `${w}.fields.${label} düzgün deyil`;
-      if (sp.type !== undefined && !TYPES.includes(sp.type)) return `${w}.fields.${label}.type text, number, date və ya url olmalıdır`;
-      if (sp.divide !== undefined && !(typeof sp.divide === "number" && sp.divide > 0 && sp.divide <= 1e6)) return `${w}.fields.${label}.divide düzgün deyil`;
-      if (sp.max !== undefined && !(Number.isInteger(sp.max) && sp.max >= 1 && sp.max <= 1000)) return `${w}.fields.${label}.max 1-1000 olmalıdır`;
-    }
-    if (s.lines !== undefined && (!s.lines || typeof s.lines.path !== "string" || typeof s.lines.title !== "string")) return `${w}.lines üçün path və title tələb olunur`;
+    const fe = validateFields(w, s);
+    if (fe) return fe;
   }
+  return null;
+}
+
+/** Göstəriləcək sahələr (fields) və tərkib (lines) yoxlaması: məlumat növləri və sifariş axtarışı üçün ortaq. */
+export function validateFields(w, s) {
+  if (!s.fields || typeof s.fields !== "object" || Array.isArray(s.fields)) return `${w}.fields tələb olunur`;
+  const entries = Object.entries(s.fields);
+  if (!entries.length || entries.length > MAX_FIELDS) return `${w}.fields 1-${MAX_FIELDS} sahə olmalıdır`;
+  for (const [label, raw] of entries) {
+    if (!label.trim() || label.length > 40 || /[\u0000-\u001f<>]/.test(label)) return `${w}.fields: sahə adı düzgün deyil (maksimum 40 simvol)`;
+    const sp = typeof raw === "string" ? { path: raw } : raw;
+    if (!sp || typeof sp !== "object" || !(typeof sp.path === "string" || typeof sp.template === "string") || (sp.path ?? sp.template).length > 200) return `${w}.fields.${label} düzgün deyil`;
+    if (sp.type !== undefined && !TYPES.includes(sp.type)) return `${w}.fields.${label}.type text, number, date və ya url olmalıdır`;
+    if (sp.divide !== undefined && !(typeof sp.divide === "number" && sp.divide > 0 && sp.divide <= 1e6)) return `${w}.fields.${label}.divide düzgün deyil`;
+    if (sp.max !== undefined && !(Number.isInteger(sp.max) && sp.max >= 1 && sp.max <= 1000)) return `${w}.fields.${label}.max 1-1000 olmalıdır`;
+  }
+  if (s.lines !== undefined && (!s.lines || typeof s.lines.path !== "string" || typeof s.lines.title !== "string")) return `${w}.lines üçün path və title tələb olunur`;
   return null;
 }
 
@@ -123,6 +133,7 @@ export function preparePrivateData(input, apiSecret, previous) {
     else if (previous?.auth?.encryptedValue) out.auth.encryptedValue = previous.auth.encryptedValue;
   }
   out.sources = structuredClone(input.sources).map((s) => ({ ...s, title: s.title.trim(), description: s.description.trim() }));
+  if (input.lookup) out.lookup = { ...structuredClone(input.lookup), ...(typeof input.lookup.title === "string" && { title: input.lookup.title.trim() }) };
   if (previous?.identity) out.identity = previous.identity;
   return out;
 }
@@ -133,7 +144,7 @@ export function privateView(tenant) {
   if (!d) return { configured: false, sources: [], identity: { configured: false } };
   const { identity, auth, ...rest } = d;
   // Yalnız gizli açar var (məlumat mənbəyi yox): API qoşulmayıb sayılır
-  return { configured: Boolean(d.baseUrl && d.sources?.length), ...rest, sources: d.sources ?? [], ...(auth && { auth: { type: auth.type, ...(auth.name && { name: auth.name }), hasSecret: Boolean(auth.encryptedValue) } }),
+  return { configured: Boolean(d.baseUrl && (d.sources?.length || d.lookup)), ...rest, sources: d.sources ?? [], ...(auth && { auth: { type: auth.type, ...(auth.name && { name: auth.name }), hasSecret: Boolean(auth.encryptedValue) } }),
     identity: { configured: Boolean(identity?.secretEnc), createdAt: identity?.createdAt ?? null }, ready: privateReady(tenant) };
 }
 
@@ -175,7 +186,7 @@ const clean = (v, max = 200) => {
 const httpUrl = (v) => { try { const u = new URL(String(v)); return /^https?:$/.test(u.protocol) ? u.toString().slice(0, 300) : null; } catch { return null; } };
 const read = (item, sp) => (sp.template ? renderTemplate(sp.template, item) : getPath(item, sp.path));
 
-function mapRecord(spec, item) {
+export function mapRecord(spec, item) {
   const out = {};
   for (const [label, raw] of Object.entries(spec.fields)) {
     const sp = typeof raw === "string" ? { path: raw } : raw;
@@ -211,12 +222,10 @@ function allowLookup(tenantId, sub, now = Date.now()) {
 }
 export const resetPrivateLimits = () => hits.clear();
 
-/** Müştəri API-sindən qeydləri gətirir. userId yalnız yoxlanmış identity-dən gəlir. */
-export async function fetchPrivate(tenant, key, sub, { id } = {}) {
-  const d = tenant.privateData, spec = d?.sources?.find((s) => s.key === key);
-  if (!spec) throw new ConnectorError("Bu məlumat növü qoşulmayıb", "NOT_CONFIGURED");
-  const url = new URL(spec.path.replace(/\{userId\}/g, encodeURIComponent(sub)), `${d.baseUrl}/`);
-  if (spec.userParam) url.searchParams.set(spec.userParam, sub);
+/** Müştəri API-sinə GET: yol baseUrl daxilində qalmalıdır, açar şifrədən açılır, SSRF qoruması safeFetchJson-dadır. */
+export async function getJson(d, path, params = {}) {
+  const url = new URL(path, `${d.baseUrl}/`);
+  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
   if (url.origin !== new URL(d.baseUrl).origin) throw new ConnectorError("Yol icazəsiz ünvana çıxır", "UNSAFE_URL");
   const headers = {};
   const a = d.auth;
@@ -225,7 +234,14 @@ export async function fetchPrivate(tenant, key, sub, { id } = {}) {
     if (!secret) throw new ConnectorError("Müştəri API açarı konfiqurasiya edilməyib", "NO_SECRET");
     if (a.type === "header") headers[a.name] = secret; else if (a.type === "bearer") headers.Authorization = `Bearer ${secret}`; else url.searchParams.set(a.name, secret);
   }
-  const json = await safeFetchJson(url.toString(), { method: "GET", headers, timeoutMs: 5000, maxBytes: 500_000 });
+  return safeFetchJson(url.toString(), { method: "GET", headers, timeoutMs: 5000, maxBytes: 500_000 });
+}
+
+/** Müştəri API-sindən qeydləri gətirir. userId yalnız yoxlanmış identity-dən gəlir. */
+export async function fetchPrivate(tenant, key, sub, { id } = {}) {
+  const d = tenant.privateData, spec = d?.sources?.find((s) => s.key === key);
+  if (!spec) throw new ConnectorError("Bu məlumat növü qoşulmayıb", "NOT_CONFIGURED");
+  const json = await getJson(d, spec.path.replace(/\{userId\}/g, encodeURIComponent(sub)), spec.userParam ? { [spec.userParam]: sub } : {});
   const raw = getPath(json, spec.itemsPath);
   let list = (Array.isArray(raw) ? raw : []).slice(0, 200);
   // Müştəri API-si səhvən başqasının sətrini qaytarsa belə sızmasın

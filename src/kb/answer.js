@@ -10,6 +10,7 @@ import { maskPII, queryLoggingOn } from "../queries/queries.js";
 import { actionDeclarations, actionsPrompt, isActionTool, runActionTool } from "../actions/actions.js";
 import { ORDER_TOOL, orderDeclaration, orderEnabled, orderPrompt, runOrderTool } from "../orders/orders.js";
 import { privateDeclarations, privatePrompt, privateToolNames, runPrivateTool } from "../private/privateData.js";
+import { LOOKUP_TOOL, lookupDeclaration, lookupPrompt, lookupReady, runLookupTool } from "../private/orderLookup.js";
 
 import { chatModels, RETRYABLE } from "../ai/llm.js";
 import { historyContents } from "../ai/history.js";
@@ -30,7 +31,7 @@ export const fallbackText = (tenant) => tenant.profile?.fallbackMessage?.trim() 
 
 const DEFAULT_LANG = { az: "Azərbaycan dili (Latın əlifbası)", en: "English", ru: "русский", tr: "Türkçe" };
 
-function system(tenant, identity, proc = null, sid = null) {
+function system(tenant, identity, proc = null, sid = null, lookup = false) {
   const p = tenant.profile ?? {};
   return `Sən ${p.businessName ? `"${p.businessName}" şirkətinin` : "şirkətin"} dəstək operatorusan (ünvan: ${p.domain ?? "-"}). Şirkətin fəaliyyət sahəsini yalnız KONTEKSTdən öyrən; adından və ya domen adından təxmin etmə.
 QAYDALAR:
@@ -46,7 +47,7 @@ ${p.generalKnowledge === false
 8. Elan və ya məhsul axtarışı, göstərmək və ya satış təklif etmə: bu rejimdə yalnız suallara cavab verirsən. Özünü "məsləhətçi" və ya "elan köməkçisi" kimi təqdim etmə.
 9. Tarixçədəki əvvəlki cavabların qısaldılmış saxlanılır (sonu kəsilmiş ola bilər): bu səhv deyil. Əvvəlki cavabını natamam və ya səhv sayma, üzr istəmə, özbaşına düzəliş etmə; yalnız istifadəçi konkret səhv göstərsə yoxla. "Tamam", "sağ ol" kimi mesajlara bir qısa cümlə ilə cavab ver.
 10. Cavabdan sonra ayrıca sətirdə istifadə etdiyin kontekst nömrələrini yaz, məsələn: [[S:1,3]]. NO_ANSWER halında bunu yazma.
-${styleLines(p, "dostcasına, peşəkar")}${p.extraInstructions ? "\n" + p.extraInstructions : ""}${privatePrompt(tenant, identity)}${sid ? actionsPrompt(tenant, identity) : ""}${orderPrompt(tenant)}${procedurePrompt(proc)}`;
+${styleLines(p, "dostcasına, peşəkar")}${p.extraInstructions ? "\n" + p.extraInstructions : ""}${privatePrompt(tenant, identity)}${sid ? actionsPrompt(tenant, identity) : ""}${orderPrompt(tenant)}${lookup ? lookupPrompt(tenant) : ""}${procedurePrompt(proc)}`;
 }
 
 export const header = (c) => [c.title, c.heading].filter(Boolean).join(" — ");
@@ -98,7 +99,7 @@ const retrievalQuery = (message, history) => {
 };
 
 /** Qaytarır: { answer, sources, unanswered, tokens, costUsd, listings: [] } */
-export async function answerFromKb({ tenant, message, history = [], identity = null, sid = null, channel = null, orderSid = null }, client = geminiClient()) {
+export async function answerFromKb({ tenant, message, history = [], identity = null, sid = null, channel = null, orderSid = null, lookup = false }, client = geminiClient()) {
   const found = await searchKb(tenant.tenantId, retrievalQuery(message, history), { k: 5, client });
   const { relevant, weak, empty } = found;
   const proc = procedureHit(found.hits);
@@ -108,7 +109,7 @@ export async function answerFromKb({ tenant, message, history = [], identity = n
   if (exact) return { answer: exact.answer, sources: [], unanswered: false, tokens: 0, costUsd: 0, listings: [], qa: true };
   const general = tenant.profile?.generalKnowledge !== false;
   const usable = relevant || weak || Boolean(proc); // zəif uyğunluqda da ən yaxın hissələri veririk, model özü yoxlayır
-  const privateAware = Boolean(tenant.privateData?.sources?.length); // sifariş/ödəniş sualı sənədlərdə olmur: model yenə də "daxil ol" deyə bilsin
+  const privateAware = Boolean(tenant.privateData?.sources?.length) || (lookup && lookupReady(tenant)); // sifariş/ödəniş sualı sənədlərdə olmur: model yenə də "daxil ol" deyə bilsin
   // Sifariş forması aktivdirsə qısa yol bağlanır: müştərinin adı/telefonu sənədlərdə tapılmır, amma söhbət davam etməlidir
   if (!usable && !general && !privateAware && !proc && !orderEnabled(tenant)) {
     await logUnanswered(tenant, message, empty ? "empty" : "no_match");
@@ -123,19 +124,20 @@ export async function answerFromKb({ tenant, message, history = [], identity = n
   for (const model of chatModels()) {
     try {
       const orderTool = orderDeclaration(tenant);
-      const ptools = [...(identity ? privateDeclarations(tenant) : []), ...actionDeclarations(tenant, { identity, sid }), ...(orderTool ? [orderTool] : [])];
+      const lookupTool = lookup ? lookupDeclaration(tenant) : null;
+      const ptools = [...(identity ? privateDeclarations(tenant) : []), ...actionDeclarations(tenant, { identity, sid }), ...(orderTool ? [orderTool] : []), ...(lookupTool ? [lookupTool] : [])];
       const conversation = [...history.slice(-8), { role: "user", text: message }];
       const pctx = {};
       const convo = [...contents];
       let res;
       for (let i = 0; ; i++) {
-        res = await generate(client, { model, contents: convo, config: { systemInstruction: system(tenant, identity, proc, sid), ...(ptools.length && { tools: [{ functionDeclarations: ptools }] }), ...(THINKING_BUDGET !== null && { thinkingConfig: { thinkingBudget: THINKING_BUDGET } }) } });
+        res = await generate(client, { model, contents: convo, config: { systemInstruction: system(tenant, identity, proc, sid, lookup), ...(ptools.length && { tools: [{ functionDeclarations: ptools }] }), ...(THINKING_BUDGET !== null && { thinkingConfig: { thinkingBudget: THINKING_BUDGET } }) } });
         meter.add(model, res.usageMetadata);
         const calls = ptools.length ? res.functionCalls : null;
         if (!calls?.length || i >= 3) break;
         convo.push(res.candidates[0].content);
         const parts = [];
-        for (const call of calls) parts.push({ functionResponse: { name: call.name, response: { result: call.name === ORDER_TOOL ? await runOrderTool(tenant, call.args, pctx, { sid: sid ?? orderSid, channel, conversation }) : isActionTool(call.name) ? runActionTool(tenant, identity, call.name, call.args, pctx, { sid, channel }) : privateToolNames.has(call.name) ? await runPrivateTool(tenant, identity, call.name, call.args, pctx) : { error: "Naməlum alət" } } } });
+        for (const call of calls) parts.push({ functionResponse: { name: call.name, response: { result: call.name === ORDER_TOOL ? await runOrderTool(tenant, call.args, pctx, { sid: sid ?? orderSid, channel, conversation }) : call.name === LOOKUP_TOOL && lookupTool ? await runLookupTool(tenant, call.args, pctx, { sid: sid ?? orderSid }) : isActionTool(call.name) ? runActionTool(tenant, identity, call.name, call.args, pctx, { sid, channel }) : privateToolNames.has(call.name) ? await runPrivateTool(tenant, identity, call.name, call.args, pctx) : { error: "Naməlum alət" } } } });
         convo.push({ role: "user", parts });
       }
       const tokens = meter.tokens, costUsd = meter.costUsd;
