@@ -2,7 +2,7 @@
 import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { tmpFile } from "../testkit/helpers.mjs";
-import { adminSetPlan, canSpend, charge, entitlements, planReminders, quoteOrder, requestOrder, resolveRequest, setNextPlan, summary } from "../src/billing/billing.js";
+import { adminSetPlan, grantReplies, canSpend, charge, entitlements, planReminders, quoteOrder, requestOrder, resolveRequest, setNextPlan, summary } from "../src/billing/billing.js";
 import { DEFAULT_CATALOG, _resetCatalogCache, applyOrder, getCatalog, quote, rollWindow, setCatalog } from "../src/billing/plans.js";
 import { resetStores, store } from "../src/billing/storage.js";
 import { finance } from "../src/billing/finance.js";
@@ -183,6 +183,16 @@ test("aktiv abunəçisi olan planı silmək olmur", async () => {
   const id = fresh();
   await adminSetPlan(id, { plan: "pro", days: 30 });
   await assert.rejects(setCatalog({ ...DEFAULT_CATALOG, plans: DEFAULT_CATALOG.plans.filter((p) => p.id !== "pro") }), (e) => e.status === 409);
+});
+
+test("bonus cavablar: planda paket kimi, plansız sınağa; ref ilə bir dəfə", async () => {
+  const id = fresh();
+  assert.equal((await grantReplies(id, { replies: 200, ref: "p1" })).replies, 200);
+  assert.equal((await summary(id)).trial.left, 200, "plan yoxdur: sınağa əlavə olunur");
+  await buy(id, { kind: "plan", plan: "start", cycle: "month" });
+  await grantReplies(id, { replies: 50, ref: "p2" });
+  assert.equal((await grantReplies(id, { replies: 50, ref: "p2" })).duplicate, true);
+  assert.equal((await summary(id)).packLeft, 50);
 });
 
 test("kataloq yoxlanır", async () => {

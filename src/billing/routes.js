@@ -1,5 +1,5 @@
 // Balans marşrutları (xidmət açarı ilə: portal çağırır) və ödəniş provayderinin webhook-u.
-import { adminLedger, adminRequests, adminSetPlan, entitlements, getAiControl, listRequests, planReminders, quoteOrder, requestOrder, requestTopup, resolveRequest, setAiControl, setNextPlan, setSettings, summary, topup } from "./billing.js";
+import { adminLedger, adminRequests, adminSetPlan, grantReplies, entitlements, getAiControl, listRequests, planReminders, quoteOrder, requestOrder, requestTopup, resolveRequest, setAiControl, setNextPlan, setSettings, summary, topup } from "./billing.js";
 import { getCatalog, setCatalog } from "./plans.js";
 import { activeProvider, getProvider } from "./providers.js";
 import { store } from "./storage.js";
@@ -52,6 +52,11 @@ export function registerBillingRoutes(app, { serviceAuth, customerTenant }) {
   app.post(`${base}/plan/assign`, serviceAuth, customerTenant, wrap(async (req, res) => {
     const { plan, days, note, by } = req.body ?? {};
     res.json(await adminSetPlan(req.tenant.tenantId, { plan: plan === null ? null : String(plan ?? "").slice(0, 20), days, note: String(note ?? "").slice(0, 200), by }));
+  }));
+  // Bonus cavablar (partnyor bonusu, kompensasiya): ref ilə bir dəfə
+  app.post(`${base}/bonus-replies`, serviceAuth, customerTenant, wrap(async (req, res) => {
+    const { replies, ref, note, by } = req.body ?? {};
+    res.json(await grantReplies(req.tenant.tenantId, { replies, ref: String(ref ?? "").slice(0, 120), note: String(note ?? "").slice(0, 120), by }));
   }));
   app.get(`${base}/entitlements`, serviceAuth, customerTenant, wrap(async (req, res) => res.json(await entitlements(req.tenant.tenantId))));
 

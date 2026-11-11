@@ -315,6 +315,29 @@ export async function adminSetPlan(tenantId, { plan, days, note = "", by = "" })
   throw Object.assign(new Error("Yenidən cəhd edin"), { status: 503 });
 }
 
+/**
+ * Bonus cavablar (məs. partnyor kodu ilə gələn müştəriyə): paket kimi əlavə olunur, plan limiti bitəndən sonra işlənir.
+ * ref təkrar-qorumadır: eyni ref ikinci dəfə cavab əlavə etmir. Plan yoxdursa sınağa əlavə olunur.
+ */
+export async function grantReplies(tenantId, { replies, ref, note = "", by = "" }) {
+  const n = Math.round(Number(replies));
+  if (!Number.isFinite(n) || n < 1 || n > 100_000) throw Object.assign(new Error("replies 1–100000 olmalıdır"), { status: 400 });
+  if (typeof ref !== "string" || !ref) throw Object.assign(new Error("ref lazımdır"), { status: 400 });
+  const st = store();
+  const cat = await getCatalog();
+  const fresh = await addLedger({ ref: `replies:${ref}`.slice(0, 200), tenantId, type: "bonus", amount: 0, note: `+${n} bonus cavab${note ? ` · ${note}` : ""}`, by: String(by).slice(0, 80) });
+  if (!fresh) return { duplicate: true };
+  for (let i = 0; i < MAX_TRIES; i++) {
+    const acc = await ensure(tenantId);
+    const patch = subLive(acc.sub, cat)
+      ? { packs: [...(acc.packs ?? []).filter((p) => p.left > 0), { id: `bonus:${ref}`.slice(0, 120), left: n, exp: cat.packDays > 0 ? new Date(Date.now() + cat.packDays * 86_400_000).toISOString() : null, at: new Date().toISOString(), bonus: true }] }
+      : { trial: { ...(acc.trial ?? { total: 0, left: 0, until: null }), left: trialLeft(acc) + n, total: (acc.trial?.total ?? 0) + n, notified: false } };
+    if (await st.casAcc(tenantId, acc.v, patch)) return { duplicate: false, replies: n };
+    await backoff(i);
+  }
+  throw Object.assign(new Error("Yenidən cəhd edin"), { status: 503 });
+}
+
 /** Portal üçün: müştərinin imkanları (keşlənir) */
 export async function entitlements(tenantId) {
   const acc = await ensure(tenantId);
