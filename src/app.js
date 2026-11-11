@@ -30,6 +30,7 @@ import { actionsView, decideAction, newSigningSecret, prepareActions, testAction
 import { actionStats, clearActionLog, listActionLog } from "./actions/log.js";
 import { answerFromKb } from "./kb/answer.js";
 import { draftReply, validDraftInput } from "./kb/draft.js";
+import { summarizeChat, validSummaryInput } from "./kb/summary.js";
 import { registerKbRoutes } from "./kb/routes.js";
 import { deleteTenantKb } from "./kb/store.js";
 import { ANSWER_LENGTHS, cleanCompany, validateCompany } from "./ai/style.js";
@@ -170,7 +171,7 @@ function probeProblem(r, source) {
   return { code: "NO_LISTINGS", error: "Elan API-sindən heç bir elan gəlmədi. Xəritələməni yoxlaya bilmək üçün saytda ən azı bir elan olmalıdır." };
 }
 
-export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = describeImage, transcribeFn = transcribeAudio, insightsFn = analyzeTopics, draftFn = draftReply } = {}) {
+export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = describeImage, transcribeFn = transcribeAudio, insightsFn = analyzeTopics, draftFn = draftReply, summaryFn = summarizeChat } = {}) {
   const app = express();
   app.disable("x-powered-by");
   const smallJson = express.json({ limit: "100kb" });
@@ -715,6 +716,21 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
     } catch (e) {
       console.error(`[draft] ${req.tenant?.tenantId}:`, e.message);
       res.status(502).json({ error: "Qaralama alınmadı, bir az sonra yenidən cəhd edin", code: "DRAFT_FAILED" });
+    }
+  });
+  // Söhbətin AI xülasəsi (niyyət, əhval, etirazlar, növbəti addım): balansdan çıxılır, plan cavab limitinə sayılmır
+  app.post("/v1/service/tenants/:tenantId/summary", serviceAuth, customerTenant, async (req, res) => {
+    if (!validSummaryInput(req.body)) return res.status(400).json({ error: "messages düzgün deyil" });
+    const funds = await canSpend(req.tenant, { reply: false });
+    if (!funds.ok) return res.status(402).json({ error: funds.message, code: funds.code });
+    try {
+      const r = await summaryFn({ tenant: req.tenant, messages: req.body.messages.map((m) => ({ from: m.from, text: m.text.slice(0, 600) })) });
+      await addTokens(req.tenant, r.tokens);
+      try { await charge(req.tenant, { costUsd: r.costUsd ?? 0, tokens: r.tokens ?? 0 }); } catch (e) { console.error(`[billing] ${req.tenant.tenantId}:`, e.message); }
+      res.json({ summary: r.summary, usage: { tokens: r.tokens } });
+    } catch (e) {
+      console.error(`[summary] ${req.tenant?.tenantId}:`, e.message);
+      res.status(502).json({ error: "Xülasə alınmadı, bir az sonra yenidən cəhd edin", code: "SUMMARY_FAILED" });
     }
   });
   app.delete("/v1/service/tenants/:tenantId/queries", serviceAuth, customerTenant, async (req, res) => { await clearQueries(req.tenant.tenantId); res.json({ ok: true }); });
