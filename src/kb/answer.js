@@ -8,6 +8,7 @@ import { addInbox } from "./store.js";
 import { newMeter } from "../billing/pricing.js";
 import { maskPII, queryLoggingOn } from "../queries/queries.js";
 import { actionDeclarations, actionsPrompt, isActionTool, runActionTool } from "../actions/actions.js";
+import { ORDER_TOOL, orderDeclaration, orderEnabled, orderPrompt, runOrderTool } from "../orders/orders.js";
 import { privateDeclarations, privatePrompt, privateToolNames, runPrivateTool } from "../private/privateData.js";
 
 import { chatModels, RETRYABLE } from "../ai/llm.js";
@@ -45,7 +46,7 @@ ${p.generalKnowledge === false
 8. Elan və ya məhsul axtarışı, göstərmək və ya satış təklif etmə: bu rejimdə yalnız suallara cavab verirsən. Özünü "məsləhətçi" və ya "elan köməkçisi" kimi təqdim etmə.
 9. Tarixçədəki əvvəlki cavabların qısaldılmış saxlanılır (sonu kəsilmiş ola bilər): bu səhv deyil. Əvvəlki cavabını natamam və ya səhv sayma, üzr istəmə, özbaşına düzəliş etmə; yalnız istifadəçi konkret səhv göstərsə yoxla. "Tamam", "sağ ol" kimi mesajlara bir qısa cümlə ilə cavab ver.
 10. Cavabdan sonra ayrıca sətirdə istifadə etdiyin kontekst nömrələrini yaz, məsələn: [[S:1,3]]. NO_ANSWER halında bunu yazma.
-${styleLines(p, "dostcasına, peşəkar")}${p.extraInstructions ? "\n" + p.extraInstructions : ""}${privatePrompt(tenant, identity)}${sid ? actionsPrompt(tenant, identity) : ""}${procedurePrompt(proc)}`;
+${styleLines(p, "dostcasına, peşəkar")}${p.extraInstructions ? "\n" + p.extraInstructions : ""}${privatePrompt(tenant, identity)}${sid ? actionsPrompt(tenant, identity) : ""}${orderPrompt(tenant)}${procedurePrompt(proc)}`;
 }
 
 export const header = (c) => [c.title, c.heading].filter(Boolean).join(" — ");
@@ -97,7 +98,7 @@ const retrievalQuery = (message, history) => {
 };
 
 /** Qaytarır: { answer, sources, unanswered, tokens, costUsd, listings: [] } */
-export async function answerFromKb({ tenant, message, history = [], identity = null, sid = null, channel = null }, client = geminiClient()) {
+export async function answerFromKb({ tenant, message, history = [], identity = null, sid = null, channel = null, orderSid = null }, client = geminiClient()) {
   const found = await searchKb(tenant.tenantId, retrievalQuery(message, history), { k: 5, client });
   const { relevant, weak, empty } = found;
   const proc = procedureHit(found.hits);
@@ -108,7 +109,8 @@ export async function answerFromKb({ tenant, message, history = [], identity = n
   const general = tenant.profile?.generalKnowledge !== false;
   const usable = relevant || weak || Boolean(proc); // zəif uyğunluqda da ən yaxın hissələri veririk, model özü yoxlayır
   const privateAware = Boolean(tenant.privateData?.sources?.length); // sifariş/ödəniş sualı sənədlərdə olmur: model yenə də "daxil ol" deyə bilsin
-  if (!usable && !general && !privateAware && !proc) {
+  // Sifariş forması aktivdirsə qısa yol bağlanır: müştərinin adı/telefonu sənədlərdə tapılmır, amma söhbət davam etməlidir
+  if (!usable && !general && !privateAware && !proc && !orderEnabled(tenant)) {
     await logUnanswered(tenant, message, empty ? "empty" : "no_match");
     return { answer: fallbackText(tenant), sources: [], unanswered: true, tokens: 0, costUsd: 0, listings: [] };
   }
@@ -120,7 +122,9 @@ export async function answerFromKb({ tenant, message, history = [], identity = n
   let lastErr;
   for (const model of chatModels()) {
     try {
-      const ptools = [...(identity ? privateDeclarations(tenant) : []), ...actionDeclarations(tenant, { identity, sid })];
+      const orderTool = orderDeclaration(tenant);
+      const ptools = [...(identity ? privateDeclarations(tenant) : []), ...actionDeclarations(tenant, { identity, sid }), ...(orderTool ? [orderTool] : [])];
+      const conversation = [...history.slice(-8), { role: "user", text: message }];
       const pctx = {};
       const convo = [...contents];
       let res;
@@ -131,12 +135,12 @@ export async function answerFromKb({ tenant, message, history = [], identity = n
         if (!calls?.length || i >= 3) break;
         convo.push(res.candidates[0].content);
         const parts = [];
-        for (const call of calls) parts.push({ functionResponse: { name: call.name, response: { result: isActionTool(call.name) ? runActionTool(tenant, identity, call.name, call.args, pctx, { sid, channel }) : privateToolNames.has(call.name) ? await runPrivateTool(tenant, identity, call.name, call.args, pctx) : { error: "Naməlum alət" } } } });
+        for (const call of calls) parts.push({ functionResponse: { name: call.name, response: { result: call.name === ORDER_TOOL ? await runOrderTool(tenant, call.args, pctx, { sid: sid ?? orderSid, channel, conversation }) : isActionTool(call.name) ? runActionTool(tenant, identity, call.name, call.args, pctx, { sid, channel }) : privateToolNames.has(call.name) ? await runPrivateTool(tenant, identity, call.name, call.args, pctx) : { error: "Naməlum alət" } } } });
         convo.push({ role: "user", parts });
       }
       const tokens = meter.tokens, costUsd = meter.costUsd;
       const { answer, noAnswer, used } = parseMarkers(res.text ?? "");
-      const priv = { ...(pctx.private && { private: true }), ...(pctx.pendingAction && { confirm: pctx.pendingAction }) };
+      const priv = { ...(pctx.private && { private: true }), ...(pctx.pendingAction && { confirm: pctx.pendingAction }), ...(pctx.order && { order: pctx.order }) };
       if (!answer || (noAnswer && !answer)) { await logUnanswered(tenant, message, "empty_answer"); return { answer: fallbackText(tenant), sources: [], unanswered: true, tokens, costUsd, listings: [], ...priv }; }
       if (noAnswer) await logUnanswered(tenant, message, "model_unsure");
       return { answer, sources: noAnswer || !usable ? [] : sourcesOf(hits, used), unanswered: noAnswer, tokens, costUsd, listings: [], ...priv };

@@ -13,7 +13,7 @@ import { advise } from "./ai/advisor.js";
 import { analyzeTopics, MIN_QUESTIONS } from "./queries/insights.js";
 import { maskPII, queryTrend, questionSample, recordQuery, recordClick, listQueries, queryStats, clearQueries, listConversations, getConversation } from "./queries/queries.js";
 import { checkAndCount, addTokens, getUsage, getUsageSummary, deleteTenantUsage } from "./usage/usage.js";
-import { canSpend, charge, deleteTenantBilling, entitlements } from "./billing/billing.js";
+import { canSpend, charge, deleteTenantBilling, entitlements, initAccount } from "./billing/billing.js";
 import { registerBillingRoutes } from "./billing/routes.js";
 import { sanitizeFilters, compileSchema } from "./data/filters.js";
 import { createRestRepo, LOCAL_SORTABLE_FIELDS } from "./connectors/restRepo.js";
@@ -33,6 +33,7 @@ import { draftReply, validDraftInput } from "./kb/draft.js";
 import { registerKbRoutes } from "./kb/routes.js";
 import { deleteTenantKb } from "./kb/store.js";
 import { ANSWER_LENGTHS, cleanCompany, validateCompany } from "./ai/style.js";
+import { cleanOrderForm, validateOrderForm } from "./orders/orders.js";
 
 const LANGS = ["az", "en", "ru", "tr"];
 const MODES = ["listings", "support", "both"];
@@ -257,13 +258,17 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
       createdAt: new Date().toISOString(), profile, ...(source && { source }),
     };
     if (feedParsed) tenant.source.feed = feedMeta(source.feed, feedParsed, feedParsed.items.length);
+    // Portal bu e-poçtun əvvəl sınaqdan istifadə etdiyini bildirirsə (hesabı silib yenidən açıb), sınaq verilmir
+    const noTrial = body.noTrial === true;
     try {
       if (feedParsed) await putFeed(tenantId, { items: feedParsed.items });
+      // Balans hesabı tenant görünməzdən ƏVVƏL yaradılır: ilk sorğu onu defolt sınaqla yarada bilməsin
+      if (noTrial) await initAccount(tenantId, { noTrial: true });
       await addCustomerTenant(tenant); refreshTenants();
     }
-    catch (err) { if (feedParsed) await deleteFeed(tenantId).catch(() => {}); return res.status(500).json({ error: "Müştəri aktivləşdirilə bilmədi", detail: err.message }); }
+    catch (err) { if (feedParsed) await deleteFeed(tenantId).catch(() => {}); if (noTrial) await deleteTenantBilling(tenantId).catch(() => {}); return res.status(500).json({ error: "Müştəri aktivləşdirilə bilmədi", detail: err.message }); }
     // API açarı yalnız bir dəfə qaytarılır; DB-də yalnız hash-i qalır.
-    res.status(201).json({ ok: true, tenantId, apiKey, sampleCount: checked.sampleCount, sampleListings: checked.sampleListings, limits: tenant.limits });
+    res.status(201).json({ ok: true, tenantId, apiKey, sampleCount: checked.sampleCount, sampleListings: checked.sampleListings, limits: tenant.limits, trial: !noTrial });
   });
 
   app.put("/v1/service/tenants/:tenantId/config", serviceAuth, customerTenant, async (req, res) => {
@@ -449,7 +454,7 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
       const support = req.tenant.profile?.mode === "support";
       // Əməliyyat təklifi yalnız portal üzərindən (təsdiq də orada olur) və yalnız söhbət ID-si varsa
       const cleanSid = typeof sid === "string" && /^[\w.:-]{6,100}$/.test(sid) ? sid : null;
-      const channel = ["widget", "telegram", "whatsapp"].includes(req.body?.channel) ? req.body.channel : "widget";
+      const channel = !req.viaPortal ? "api" : ["widget", "telegram", "whatsapp"].includes(req.body?.channel) ? req.body.channel : "widget";
       const actionCtx = req.viaPortal && cleanSid && feats.actions !== false ? { sid: cleanSid, channel } : {};
       // Şəkil əvvəl mətnə çevrilir; sonrakı axın dəyişməz qalır
       let vision = null;
@@ -471,8 +476,8 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
       const r0 = qaHit
         ? { answer: qaHit.answer, listings: [], sources: [], tokens: 0, costUsd: 0, qa: true, searched: false }
         : support
-        ? await kbFn({ tenant: req.tenant, message: question, history: hist, identity, ...actionCtx })
-        : await adviseFn({ tenant: req.tenant, repo: await getRepo(req.tenant), message: question, history: hist, identity, channel, ...actionCtx, live: Boolean(req.viaPortal && req.body?.live === true) });
+        ? await kbFn({ tenant: req.tenant, message: question, history: hist, identity, channel, orderSid: cleanSid, ...actionCtx })
+        : await adviseFn({ tenant: req.tenant, repo: await getRepo(req.tenant), message: question, history: hist, identity, channel, orderSid: cleanSid, ...actionCtx, live: Boolean(req.viaPortal && req.body?.live === true) });
       const r = vision ? { ...r0, tokens: (r0.tokens ?? 0) + vision.tokens, costUsd: (r0.costUsd ?? 0) + (vision.costUsd ?? 0) } : r0;
       mark("model");
       await addTokens(req.tenant, r.tokens);
@@ -486,7 +491,7 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
       const results = support ? (r.unanswered ? 0 : 1) : !searched ? (r.unanswered ? -2 : -1) : (r.listings?.length ?? 0);
       if (!req.skipQueryLog) await recordQuery(req.tenant, { message: `${image ? "(şəkil) " : ""}${message.trim()}`, results, tokens: r.tokens, cached: r.cached, costAzn: bill?.billedAzn, sid, answer: r.answer, private: r.private, listings: r.listings, confirm: r.confirm });
       mark("log"); slowLog("ok");
-      res.json({ answer: r.answer, listings: r.listings ?? [], ...(vision && { imageNote: vision.description.slice(0, 200) }), ...(r.sources && { sources: r.sources }), ...(r.unanswered && { unanswered: true }), ...(r.handoff && { handoff: true }), ...(r.confirm && { confirm: r.confirm }), ...(identityToken && !identity && { identity: "invalid" }), usage: { tokens: r.tokens },
+      res.json({ answer: r.answer, listings: r.listings ?? [], ...(vision && { imageNote: vision.description.slice(0, 200) }), ...(r.sources && { sources: r.sources }), ...(r.unanswered && { unanswered: true }), ...(r.handoff && { handoff: true }), ...(r.confirm && { confirm: r.confirm }), ...(r.order && { order: r.order }), ...(identityToken && !identity && { identity: "invalid" }), usage: { tokens: r.tokens },
         // Balans vəziyyəti yalnız portala verilir (müştərinin açıq API-sində görünmür)
         ...(req.viaPortal && bill && { billing: { state: bill.state, balanceAzn: bill.balanceAzn, billedAzn: bill.billedAzn, ...(bill.notify && { notify: bill.notify }), ...(bill.plan && { plan: bill.plan }), ...(bill.trial && { trial: bill.trial }) } }) });
     } catch (err) {
@@ -581,6 +586,22 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
     catch (e) { res.status(422).json({ ok: false, error: e.message, code: e.code ?? "TEST_FAILED" }); }
   });
 
+  // ---------- API-siz sifariş forması ----------
+  app.get("/v1/service/tenants/:tenantId/order-form", serviceAuth, customerTenant, (req, res) => res.json({ form: req.tenant.orderForm ?? null }));
+  app.put("/v1/service/tenants/:tenantId/order-form", serviceAuth, customerTenant, async (req, res) => {
+    const error = validateOrderForm(req.body ?? {});
+    if (error) return res.status(400).json({ error });
+    const form = cleanOrderForm(req.body);
+    await updateCustomerTenant(req.tenant.tenantId, (t) => ({ ...t, orderForm: form }));
+    refreshTenants();
+    res.json({ form });
+  });
+  app.delete("/v1/service/tenants/:tenantId/order-form", serviceAuth, customerTenant, async (req, res) => {
+    await updateCustomerTenant(req.tenant.tenantId, (t) => { const { orderForm: _o, ...rest } = t; return rest; });
+    refreshTenants();
+    res.json({ ok: true });
+  });
+
   // ---------- Əməliyyatlar (yazma: ləğv et, bilet yarat, rezerv et...) ----------
   app.get("/v1/service/tenants/:tenantId/actions", serviceAuth, customerTenant, (req, res) => res.json(actionsView(req.tenant)));
   app.put("/v1/service/tenants/:tenantId/actions", serviceAuth, customerTenant, async (req, res) => {
@@ -619,8 +640,7 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
   });
   // İstifadəçinin qərarı: yalnız portal (identity token + sid onda yoxlanılıb) çağırır
   app.post("/v1/service/tenants/:tenantId/actions/confirm", serviceAuth, customerTenant, async (req, res) => {
-    req.viaPortal = true; // /v1/service/* yalnız portalın xidmət tokeni ilə açılır
-    if (!req.viaPortal) return res.status(403).json({ error: "Bu əməliyyat yalnız çat vidjeti və kanallar üzərindən təsdiqlənir", code: "PORTAL_ONLY" });
+    // /v1/service/* yalnız portalın xidmət tokeni ilə açılır: bu marşrut özü "yalnız portal" yoludur (əlavə yoxlama lazım deyil)
     const { id, decision, sid, identity: identityToken } = req.body ?? {};
     if (typeof id !== "string" || !/^[0-9a-f]{32}$/.test(id) || !["confirm", "cancel"].includes(decision) || typeof sid !== "string" || sid.length > 100) return res.status(400).json({ error: "id, decision və sid düzgün deyil" });
     const identity = typeof identityToken === "string" && identityToken ? verifyIdentity(req.tenant, identityToken) : null;

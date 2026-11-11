@@ -88,7 +88,7 @@ export function registerKbRoutes(app, { serviceAuth, customerTenant }) {
   // ---- cavabsız suallar ----
   const inboxView = (d) => ({ id: d._id, at: d.at, ...(d.message !== undefined && { message: d.message }), ...(d.reason && { reason: d.reason }),
     ...(d.contact !== undefined && { name: d.name ?? "", contact: d.contact, question: d.question ?? "", conversation: d.conversation ?? [], handled: leadStatus(d) === "solved",
-      status: leadStatus(d), priority: d.priority ?? "normal", assignee: d.assignee ?? null, notes: d.notes ?? [], history: d.history ?? [], ...(d.updatedAt && { updatedAt: d.updatedAt }) }) });
+      status: leadStatus(d), priority: d.priority ?? "normal", assignee: d.assignee ?? null, notes: d.notes ?? [], history: d.history ?? [], ...(d.updatedAt && { updatedAt: d.updatedAt }), ...(d.order && { order: d.order }) }) });
   // Müraciətin vəziyyəti: yeni → işdədir → gözləmədə (müştəridən cavab) → həll olunub. Köhnə qeydlərdə yalnız handled var.
   const LEAD_STATUS = ["new", "open", "pending", "solved"];
   const LEAD_PRIORITY = ["low", "normal", "high"];

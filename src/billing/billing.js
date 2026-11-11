@@ -29,14 +29,15 @@ function fitLots(lots, paid) {
   return out.filter((l) => l.left > 0);
 }
 
-async function ensure(tenantId) {
+async function ensure(tenantId, { noTrial = false } = {}) {
   const st = store();
   let acc = await st.getAcc(tenantId);
   if (!acc) {
-    // Pulsuz sınaq: N cavab, D gün ərzində (hansı tez bitsə)
-    const n = config.trialReplies(), days = config.trialDays();
+    // Pulsuz sınaq: N cavab, D gün ərzində (hansı tez bitsə).
+    // noTrial: bu e-poçt əvvəl sınaqdan istifadə edib (hesabı silib yenidən açıb): pulsuz sınaq və pulsuz məbləğ verilmir
+    const n = noTrial ? 0 : config.trialReplies(), days = config.trialDays();
     const trial = n > 0 ? { left: n, total: n, until: days > 0 ? new Date(Date.now() + days * 86_400_000).toISOString() : null, notified: false } : null;
-    await st.createAcc({ _id: tenantId, free: toMicro(config.freeAzn()), freeMonth: month(), paid: 0, lots: [], creditLimit: 0, markup: null, spent: 0, notified: { low: false, empty: false }, ...(trial && { trial }), v: 0, createdAt: new Date().toISOString() });
+    await st.createAcc({ _id: tenantId, free: noTrial ? 0 : toMicro(config.freeAzn()), freeMonth: month(), paid: 0, lots: [], creditLimit: 0, markup: null, spent: 0, notified: { low: false, empty: false }, ...(trial && { trial }), ...(noTrial && { noTrial: true }), v: 0, createdAt: new Date().toISOString() });
     acc = await st.getAcc(tenantId);
   }
   // Köhnə hesab (partiyasız): mövcud yüklənmiş balans bir partiya olur, müddət bu andan sayılır (müştəri itirmir)
@@ -71,7 +72,7 @@ async function ensure(tenantId) {
   }
   // Aylıq yenilənən pulsuz məbləğ: yığılmır, hər ay təzədən başlayır
   if (config.freePeriod() === "monthly" && acc.freeMonth !== month()) {
-    const patch = { free: toMicro(config.freeAzn()), freeMonth: month(), notified: { low: false, empty: false } };
+    const patch = { free: acc.noTrial ? 0 : toMicro(config.freeAzn()), freeMonth: month(), notified: { low: false, empty: false } };
     if (await st.casAcc(tenantId, acc.v, patch)) acc = { ...acc, ...patch, v: acc.v + 1 };
     else acc = await st.getAcc(tenantId);
   }
@@ -336,6 +337,11 @@ export async function grantReplies(tenantId, { replies, ref, note = "", by = "" 
     await backoff(i);
   }
   throw Object.assign(new Error("Yenidən cəhd edin"), { status: 503 });
+}
+
+/** Yeni müştərinin balans hesabını dərhal yaradır. noTrial: pulsuz sınaq və pulsuz məbləğ verilmir (təkrar qeydiyyat). */
+export async function initAccount(tenantId, { noTrial = false } = {}) {
+  await ensure(tenantId, { noTrial });
 }
 
 /** Portal üçün: müştərinin imkanları (keşlənir) */

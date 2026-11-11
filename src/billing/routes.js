@@ -101,16 +101,21 @@ export function registerBillingRoutes(app, { serviceAuth, customerTenant }) {
     if (!p?.handleWebhook) return res.status(404).json({ error: "Provayder tapılmadı" });
     const evt = await p.handleWebhook(req);
     if (!evt) return res.status(400).json({ error: "Etibarsız xəbər" });
-    // Plan/paket sifarişi: ödəniş sifarişin özüdür (balansa yazılmır), təsdiq onu tətbiq edir
+    // Sorğuya bağlı ödəniş (yükləmə, plan və ya paket): pul YALNIZ resolveRequest ilə yazılır (ref "req:<id>").
+    // Əvvəl burada həm topup ("pay:..." ref-i ilə), həm də resolveRequest (yenidən topup, "req:..." ref-i ilə) çağırılırdı:
+    // ref-lər fərqli olduğu üçün təkrar-qoruma işləmirdi və 10 AZN ödəniş balansa 20 AZN yazırdı.
     const order = evt.requestId ? await store().getReq(String(evt.requestId)) : null;
-    if (order && (order.kind === "plan" || order.kind === "pack")) {
-      if (order.tenantId !== evt.tenantId || Math.abs(order.amount - Math.round(evt.amountAzn * 1e6)) > 10_000) return res.status(400).json({ error: "Sifariş uyğun gəlmir" });
-      const dup = order.status === "approved";
-      if (!dup) await resolveRequest(order._id, "approve", p.name);
-      return res.json({ ok: true, duplicate: dup });
+    if (order) {
+      if (order.tenantId !== evt.tenantId || Math.abs(order.amount - Math.round(Number(evt.amountAzn) * 1e6)) > 10_000) return res.status(400).json({ error: "Sifariş uyğun gəlmir" });
+      if (order.status === "approved") return res.json({ ok: true, duplicate: true });
+      if (order.status === "pending") {
+        await resolveRequest(order._id, "approve", p.name);
+        return res.json({ ok: true, duplicate: false });
+      }
+      // Sorğu admin tərəfindən rədd edilib, amma pul ödənilib: itməsin, adi yükləmə kimi balansa yazılır (aşağıda)
+      console.warn(`[billing] rədd edilmiş sorğu ${order._id} üçün ödəniş gəldi, balansa yazılır`);
     }
     const out = await topup(evt.tenantId, evt.amountAzn, { note: `Ödəniş (${p.name})`, by: p.name, ref: `pay:${p.name}:${evt.ref}` });
-    if (evt.requestId) { try { await resolveRequest(evt.requestId, "approve", p.name); } catch { /* sorğu yoxdur/artıq həll olunub */ } }
     res.json({ ok: true, duplicate: out.duplicate });
   }));
 }

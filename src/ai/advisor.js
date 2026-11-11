@@ -8,6 +8,7 @@ import { newMeter } from "../billing/pricing.js";
 import { actionDeclarations, actionsPrompt, hasActions, isActionTool, runActionTool } from "../actions/actions.js";
 import { privateDeclarations, privatePrompt, privateToolNames, runPrivateTool } from "../private/privateData.js";
 import { styleLines } from "./style.js";
+import { ORDER_TOOL, orderDeclaration, orderPrompt, runOrderTool } from "../orders/orders.js";
 
 // Ziyarətçi operatorla danışmaq istəyəndə və ya köməkçi kömək edə bilməyəndə çağırılır: vidjet əlaqə formasını göstərir.
 const handoffDeclaration = {
@@ -38,7 +39,7 @@ const CACHE_TTL_MS = (Number(process.env.ANSWER_CACHE_SECONDS) || 300) * 1000;
 
 const answerCache = new Map();
 const cacheKey = (tenant, message, channel) =>
-  `${tenant.tenantId}|${hasCards(channel) ? "c" : "t"}|${createHash("sha1").update(JSON.stringify([tenant.profile, tenant.source])).digest("hex").slice(0, 12)}|${message.toLowerCase().replace(/\s+/g, " ").replace(/[?!.,;]+$/g, "").trim()}`;
+  `${tenant.tenantId}|${hasCards(channel) ? "c" : "t"}|${createHash("sha1").update(JSON.stringify([tenant.profile, tenant.source, tenant.orderForm ?? null])).digest("hex").slice(0, 12)}|${message.toLowerCase().replace(/\s+/g, " ").replace(/[?!.,;]+$/g, "").trim()}`;
 
 // Müştərinin seçdiyi dil DEFOLT dildir. İstifadəçi başqa dildə (rus, ingilis, türk və s.) yazırsa, həmin dildə cavab verilir.
 const LANG = {
@@ -115,10 +116,12 @@ async function generateWithRetry(client, params) {
   }
 }
 
-async function runWithModel(client, model, { tenant, repo, system, message, history, meter, identity, live = false, sid = null, channel = null }) {
+async function runWithModel(client, model, { tenant, repo, system, message, history, meter, identity, live = false, sid = null, channel = null, orderSid = null }) {
   const ctx = { listings: [] };
   const both = tenant.profile?.mode === "both";
-  const tools = [buildToolDeclaration(repo.schema), ...(both ? [kbToolDeclaration] : []), ...(identity ? privateDeclarations(tenant) : []), ...actionDeclarations(tenant, { identity, sid }), handoffDeclaration];
+  const orderTool = orderDeclaration(tenant);
+  const tools = [buildToolDeclaration(repo.schema), ...(both ? [kbToolDeclaration] : []), ...(identity ? privateDeclarations(tenant) : []), ...actionDeclarations(tenant, { identity, sid }), ...(orderTool ? [orderTool] : []), handoffDeclaration];
+  const conversation = [...history.slice(-8), { role: "user", text: message }];
   const contents = [
     ...historyContents(history, HISTORY_TURNS, HISTORY_CHARS),
     { role: "user", parts: [{ text: message }] },
@@ -141,7 +144,7 @@ async function runWithModel(client, model, { tenant, repo, system, message, hist
     contents.push(response.candidates[0].content); // olduğu kimi qaytar
     const parts = [];
     for (const call of calls) {
-      const result = call.name === handoffDeclaration.name ? (ctx.handoff = true, live ? { ok: true, note: "Söhbət canlı operatora ötürülür. Qısa və mehriban de ki, operator tezliklə burada yazacaq, bir az gözləsin. Əlavə sual vermə." } : { ok: true, note: "İstifadəçiyə əlaqə formu göstəriləcək. Qısa de: operatora birbaşa qoşa bilmirsən, amma aşağıdakı formada telefon və ya email qoysa operator onunla əlaqə saxlayacaq." }) : call.name === kbToolDeclaration.name ? await runKbTool(tenant, call.args, ctx, client) : isActionTool(call.name) ? runActionTool(tenant, identity, call.name, call.args, ctx, { sid, channel }) : privateToolNames.has(call.name) ? await runPrivateTool(tenant, identity, call.name, call.args, ctx) : await runTool(repo, tenant, call.name, call.args, ctx);
+      const result = call.name === handoffDeclaration.name ? (ctx.handoff = true, live ? { ok: true, note: "Söhbət canlı operatora ötürülür. Qısa və mehriban de ki, operator tezliklə burada yazacaq, bir az gözləsin. Əlavə sual vermə." } : { ok: true, note: "İstifadəçiyə əlaqə formu göstəriləcək. Qısa de: operatora birbaşa qoşa bilmirsən, amma aşağıdakı formada telefon və ya email qoysa operator onunla əlaqə saxlayacaq." }) : call.name === kbToolDeclaration.name ? await runKbTool(tenant, call.args, ctx, client) : call.name === ORDER_TOOL ? await runOrderTool(tenant, call.args, ctx, { sid: sid ?? orderSid, channel, conversation }) : isActionTool(call.name) ? runActionTool(tenant, identity, call.name, call.args, ctx, { sid, channel }) : privateToolNames.has(call.name) ? await runPrivateTool(tenant, identity, call.name, call.args, ctx) : await runTool(repo, tenant, call.name, call.args, ctx);
       parts.push({ functionResponse: { name: call.name, response: { result } } });
     }
     contents.push({ role: "user", parts });
@@ -150,18 +153,18 @@ async function runWithModel(client, model, { tenant, repo, system, message, hist
 }
 
 // Qaytarır: { answer, listings, tokens }.  client: test üçün saxta müştəri vermək olar (Gemini formatında)
-export async function advise({ tenant, repo, message, history = [], identity = null, live = false, sid = null, channel = null }, client = defaultClient()) {
+export async function advise({ tenant, repo, message, history = [], identity = null, live = false, sid = null, channel = null, orderSid = null }, client = defaultClient()) {
   // Eyni sual (söhbət tarixçəsi yoxdur) qısa müddət keşdən verilir: token xərcləmir
   const key = !identity && !hasActions(tenant) && history.length === 0 && CACHE_TTL_MS > 0 && tenant.profile?.mode !== "both" ? cacheKey(tenant, message, channel) : null;
   const hit = key && answerCache.get(key);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) return { answer: hit.answer, listings: hit.listings, searched: hit.searched ?? true, tokens: 0, costUsd: 0, cached: true };
 
-  const system = (await buildSystem(tenant, repo, channel)) + privatePrompt(tenant, identity) + (sid ? actionsPrompt(tenant, identity) : "");
+  const system = (await buildSystem(tenant, repo, channel)) + privatePrompt(tenant, identity) + (sid ? actionsPrompt(tenant, identity) : "") + orderPrompt(tenant);
   const meter = newMeter(); // uğursuz model cəhdlərinin xərci də hesaba düşür
   let lastErr;
   for (const model of chatModels()) {
     try {
-      const { text, ctx } = await runWithModel(client, model, { tenant, repo, system, message, history, meter, identity, live, sid, channel });
+      const { text, ctx } = await runWithModel(client, model, { tenant, repo, system, message, history, meter, identity, live, sid, channel, orderSid });
       const seen = new Set();
       const shown = pickShown(text, ctx.listings.filter((l) => !seen.has(l.id) && seen.add(l.id)));
       const listings = shown.listings;
@@ -171,7 +174,7 @@ export async function advise({ tenant, repo, message, history = [], identity = n
         answerCache.set(key, { at: Date.now(), answer, listings, searched: Boolean(ctx.searched) });
       }
       const sources = ctx.kbHits?.length ? sourcesOf(ctx.kbHits, []) : [];
-      return { answer, listings, searched: Boolean(ctx.searched), tokens: meter.tokens, costUsd: meter.costUsd, ...(sources.length && { sources }), ...(ctx.handoff && { unanswered: true, handoff: true }), ...(ctx.private && { private: true }), ...(ctx.pendingAction && { confirm: ctx.pendingAction }) };
+      return { answer, listings, searched: Boolean(ctx.searched), tokens: meter.tokens, costUsd: meter.costUsd, ...(sources.length && { sources }), ...(ctx.handoff && { unanswered: true, handoff: true }), ...(ctx.private && { private: true }), ...(ctx.pendingAction && { confirm: ctx.pendingAction }), ...(ctx.order && { order: ctx.order }) };
     } catch (err) {
       lastErr = err;
       if (RETRYABLE.includes(err.status)) { console.warn(`[ai] ${model} alınmadı (${err.status}), növbəti model`); continue; }
