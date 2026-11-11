@@ -11,6 +11,7 @@ import { actionDeclarations, actionsPrompt, isActionTool, runActionTool } from "
 import { ORDER_TOOL, orderDeclaration, orderEnabled, orderPrompt, runOrderTool } from "../orders/orders.js";
 import { privateDeclarations, privatePrompt, privateToolNames, runPrivateTool } from "../private/privateData.js";
 import { LOOKUP_TOOL, lookupDeclaration, lookupPrompt, lookupReady, runLookupTool } from "../private/orderLookup.js";
+import { HANDOFF_TOOL, handoffDeclaration, handoffPrompt, runHandoff } from "../ai/handoff.js";
 
 import { chatModels, RETRYABLE } from "../ai/llm.js";
 import { historyContents } from "../ai/history.js";
@@ -31,7 +32,7 @@ export const fallbackText = (tenant) => tenant.profile?.fallbackMessage?.trim() 
 
 const DEFAULT_LANG = { az: "Azərbaycan dili (Latın əlifbası)", en: "English", ru: "русский", tr: "Türkçe" };
 
-function system(tenant, identity, proc = null, sid = null, lookup = false) {
+function system(tenant, identity, proc = null, sid = null, lookup = false, handoff = null) {
   const p = tenant.profile ?? {};
   return `Sən ${p.businessName ? `"${p.businessName}" şirkətinin` : "şirkətin"} dəstək operatorusan (ünvan: ${p.domain ?? "-"}). Şirkətin fəaliyyət sahəsini yalnız KONTEKSTdən öyrən; adından və ya domen adından təxmin etmə.
 QAYDALAR:
@@ -43,7 +44,7 @@ QAYDALAR:
 ${p.generalKnowledge === false
     ? "6. Şirkətə aid olmayan suallara (ümumi bilik, kod, siyasət və s.) cavab vermə; nəzakətlə bunun yalnız şirkət haqqında suallar üçün olduğunu de və [[NO_ANSWER]] yaz."
     : "6. Sual şirkətin fəaliyyət sahəsinə aid ümumi sualdırsa (məs. məhsul və ya xidmət növü, seçim məsləhəti, ümumi anlayışlar) və kontekstdə cavab yoxdursa, qısa ümumi bilikdən cavab verə bilərsən, amma cavabın əvvəlində \"Bu ümumi məlumatdır, şirkətin rəsmi məlumatı deyil\" qeydini yaz, şirkətin qiymət, şərt və siyasətləri haqqında heç nə uydurma, bu halda [[NO_ANSWER]] yazma. Sahəyə aid olmayan suallara (kod, siyasət və s.) cavab vermə, nəzakətlə yalnız bu şirkətin mövzusunda kömək edə bildiyini de və [[NO_ANSWER]] yaz."}
-7. İstifadəçi operatorla, canlı insanla və ya menecerlə danışmaq istəyirsə: operatora birbaşa qoşa bilmədiyini, amma əlaqə formasında telefon və ya email qoysa operatorun onunla əlaqə saxlayacağını yaz və [[NO_ANSWER]] əlavə et.
+7. ${handoffPrompt(handoff)} Alət çağırılanda [[NO_ANSWER]] yazma.
 8. Elan və ya məhsul axtarışı, göstərmək və ya satış təklif etmə: bu rejimdə yalnız suallara cavab verirsən. Özünü "məsləhətçi" və ya "elan köməkçisi" kimi təqdim etmə.
 9. Tarixçədəki əvvəlki cavabların qısaldılmış saxlanılır (sonu kəsilmiş ola bilər): bu səhv deyil. Əvvəlki cavabını natamam və ya səhv sayma, üzr istəmə, özbaşına düzəliş etmə; yalnız istifadəçi konkret səhv göstərsə yoxla. "Tamam", "sağ ol" kimi mesajlara bir qısa cümlə ilə cavab ver.
 10. Cavabdan sonra ayrıca sətirdə istifadə etdiyin kontekst nömrələrini yaz, məsələn: [[S:1,3]]. NO_ANSWER halında bunu yazma.
@@ -99,7 +100,7 @@ const retrievalQuery = (message, history) => {
 };
 
 /** Qaytarır: { answer, sources, unanswered, tokens, costUsd, listings: [] } */
-export async function answerFromKb({ tenant, message, history = [], identity = null, sid = null, channel = null, orderSid = null, lookup = false }, client = geminiClient()) {
+export async function answerFromKb({ tenant, message, history = [], identity = null, sid = null, channel = null, orderSid = null, lookup = false, handoffRules = null, live = false }, client = geminiClient()) {
   const found = await searchKb(tenant.tenantId, retrievalQuery(message, history), { k: 5, client });
   const { relevant, weak, empty } = found;
   const proc = procedureHit(found.hits);
@@ -125,24 +126,28 @@ export async function answerFromKb({ tenant, message, history = [], identity = n
     try {
       const orderTool = orderDeclaration(tenant);
       const lookupTool = lookup ? lookupDeclaration(tenant) : null;
-      const ptools = [...(identity ? privateDeclarations(tenant) : []), ...actionDeclarations(tenant, { identity, sid }), ...(orderTool ? [orderTool] : []), ...(lookupTool ? [lookupTool] : [])];
+      // Operator aləti həmişə var: dəstək rejimində də AI müştərini (səbəbi ilə) operatora ötürə bilir
+      const ptools = [...(identity ? privateDeclarations(tenant) : []), ...actionDeclarations(tenant, { identity, sid }), ...(orderTool ? [orderTool] : []), ...(lookupTool ? [lookupTool] : []), handoffDeclaration(handoffRules, { orderForm: Boolean(orderTool) })];
       const conversation = [...history.slice(-8), { role: "user", text: message }];
       const pctx = {};
       const convo = [...contents];
       let res;
       for (let i = 0; ; i++) {
-        res = await generate(client, { model, contents: convo, config: { systemInstruction: system(tenant, identity, proc, sid, lookup), ...(ptools.length && { tools: [{ functionDeclarations: ptools }] }), ...(THINKING_BUDGET !== null && { thinkingConfig: { thinkingBudget: THINKING_BUDGET } }) } });
+        res = await generate(client, { model, contents: convo, config: { systemInstruction: system(tenant, identity, proc, sid, lookup, handoffRules), ...(ptools.length && { tools: [{ functionDeclarations: ptools }] }), ...(THINKING_BUDGET !== null && { thinkingConfig: { thinkingBudget: THINKING_BUDGET } }) } });
         meter.add(model, res.usageMetadata);
         const calls = ptools.length ? res.functionCalls : null;
         if (!calls?.length || i >= 3) break;
         convo.push(res.candidates[0].content);
         const parts = [];
-        for (const call of calls) parts.push({ functionResponse: { name: call.name, response: { result: call.name === ORDER_TOOL ? await runOrderTool(tenant, call.args, pctx, { sid: sid ?? orderSid, channel, conversation }) : call.name === LOOKUP_TOOL && lookupTool ? await runLookupTool(tenant, call.args, pctx, { sid: sid ?? orderSid }) : isActionTool(call.name) ? runActionTool(tenant, identity, call.name, call.args, pctx, { sid, channel }) : privateToolNames.has(call.name) ? await runPrivateTool(tenant, identity, call.name, call.args, pctx) : { error: "Naməlum alət" } } } });
+        for (const call of calls) parts.push({ functionResponse: { name: call.name, response: { result: call.name === HANDOFF_TOOL ? runHandoff(call.args, pctx, handoffRules, live) : call.name === ORDER_TOOL ? await runOrderTool(tenant, call.args, pctx, { sid: sid ?? orderSid, channel, conversation }) : call.name === LOOKUP_TOOL && lookupTool ? await runLookupTool(tenant, call.args, pctx, { sid: sid ?? orderSid }) : isActionTool(call.name) ? runActionTool(tenant, identity, call.name, call.args, pctx, { sid, channel }) : privateToolNames.has(call.name) ? await runPrivateTool(tenant, identity, call.name, call.args, pctx) : { error: "Naməlum alət" } } } });
         convo.push({ role: "user", parts });
       }
       const tokens = meter.tokens, costUsd = meter.costUsd;
       const { answer, noAnswer, used } = parseMarkers(res.text ?? "");
-      const priv = { ...(pctx.private && { private: true }), ...(pctx.pendingAction && { confirm: pctx.pendingAction }), ...(pctx.order && { order: pctx.order }) };
+      const priv = { ...(pctx.private && { private: true }), ...(pctx.pendingAction && { confirm: pctx.pendingAction }), ...(pctx.order && { order: pctx.order }),
+        ...(pctx.handoff && { handoff: true, unanswered: true, handoffReason: pctx.handoffReason ?? "asked", ...(pctx.handoffNote && { handoffNote: pctx.handoffNote }) }) };
+      // Operatora ötürüldü: cavab mətni boş olsa belə ötürmə qərarı itməsin
+      if (pctx.handoff) return { answer: parseMarkers(res.text ?? "").answer || fallbackText(tenant), sources: [], tokens, costUsd, listings: [], ...priv };
       if (!answer || (noAnswer && !answer)) { await logUnanswered(tenant, message, "empty_answer"); return { answer: fallbackText(tenant), sources: [], unanswered: true, tokens, costUsd, listings: [], ...priv }; }
       if (noAnswer) await logUnanswered(tenant, message, "model_unsure");
       return { answer, sources: noAnswer || !usable ? [] : sourcesOf(hits, used), unanswered: noAnswer, tokens, costUsd, listings: [], ...priv };

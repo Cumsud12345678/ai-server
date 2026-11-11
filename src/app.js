@@ -27,6 +27,7 @@ import { fetchSample, validateSampleRequest } from "./connectors/sample.js";
 import { fetchPrivate, newIdentitySecret, preparePrivateData, privateView, validatePrivateData, verifyIdentity } from "./private/privateData.js";
 import { encryptSecret } from "./tenants/secretCrypto.js";
 import { lookupOrder } from "./private/orderLookup.js";
+import { cleanHandoffRules } from "./ai/handoff.js";
 import { actionsView, decideAction, newSigningSecret, prepareActions, testAction, validateActions } from "./actions/actions.js";
 import { actionStats, clearActionLog, listActionLog } from "./actions/log.js";
 import { answerFromKb } from "./kb/answer.js";
@@ -460,6 +461,9 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
       const actionCtx = req.viaPortal && cleanSid && feats.actions !== false ? { sid: cleanSid, channel } : {};
       // Girişsiz sifariş statusu (nömrə + telefon): "Müştəri məlumatı" ilə eyni plan imkanıdır
       const lookup = feats.customerData !== false;
+      // Operatora ötürmə qaydaları (sahibin ayarı): yalnız portal göndərir, açıq API-də köhnə davranış (istəyəndə və kömək edə bilməyəndə)
+      const handoffRules = req.viaPortal ? cleanHandoffRules(req.body?.handoff) : null;
+      const liveOn = Boolean(req.viaPortal && req.body?.live === true);
       // Şəkil əvvəl mətnə çevrilir; sonrakı axın dəyişməz qalır
       let vision = null;
       if (image) {
@@ -480,8 +484,8 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
       const r0 = qaHit
         ? { answer: qaHit.answer, listings: [], sources: [], tokens: 0, costUsd: 0, qa: true, searched: false }
         : support
-        ? await kbFn({ tenant: req.tenant, message: question, history: hist, identity, channel, orderSid: cleanSid, lookup, ...actionCtx })
-        : await adviseFn({ tenant: req.tenant, repo: await getRepo(req.tenant), message: question, history: hist, identity, channel, orderSid: cleanSid, lookup, ...actionCtx, live: Boolean(req.viaPortal && req.body?.live === true) });
+        ? await kbFn({ tenant: req.tenant, message: question, history: hist, identity, channel, orderSid: cleanSid, lookup, handoffRules, live: liveOn, ...actionCtx })
+        : await adviseFn({ tenant: req.tenant, repo: await getRepo(req.tenant), message: question, history: hist, identity, channel, orderSid: cleanSid, lookup, handoffRules, ...actionCtx, live: liveOn });
       const r = vision ? { ...r0, tokens: (r0.tokens ?? 0) + vision.tokens, costUsd: (r0.costUsd ?? 0) + (vision.costUsd ?? 0) } : r0;
       mark("model");
       await addTokens(req.tenant, r.tokens);
@@ -495,7 +499,7 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
       const results = support ? (r.unanswered ? 0 : 1) : !searched ? (r.unanswered ? -2 : -1) : (r.listings?.length ?? 0);
       if (!req.skipQueryLog) await recordQuery(req.tenant, { message: `${image ? "(şəkil) " : ""}${message.trim()}`, results, tokens: r.tokens, cached: r.cached, costAzn: bill?.billedAzn, sid, answer: r.answer, private: r.private, listings: r.listings, confirm: r.confirm });
       mark("log"); slowLog("ok");
-      res.json({ answer: r.answer, listings: r.listings ?? [], ...(vision && { imageNote: vision.description.slice(0, 200) }), ...(r.sources && { sources: r.sources }), ...(r.unanswered && { unanswered: true }), ...(r.handoff && { handoff: true }), ...(r.confirm && { confirm: r.confirm }), ...(r.order && { order: r.order }), ...(identityToken && !identity && { identity: "invalid" }), usage: { tokens: r.tokens },
+      res.json({ answer: r.answer, listings: r.listings ?? [], ...(vision && { imageNote: vision.description.slice(0, 200) }), ...(r.sources && { sources: r.sources }), ...(r.unanswered && { unanswered: true }), ...(r.handoff && { handoff: true, handoffReason: r.handoffReason ?? "asked", ...(r.handoffNote && { handoffNote: r.handoffNote }) }), ...(r.confirm && { confirm: r.confirm }), ...(r.order && { order: r.order }), ...(identityToken && !identity && { identity: "invalid" }), usage: { tokens: r.tokens },
         // Balans vəziyyəti yalnız portala verilir (müştərinin açıq API-sində görünmür)
         ...(req.viaPortal && bill && { billing: { state: bill.state, balanceAzn: bill.balanceAzn, billedAzn: bill.billedAzn, ...(bill.notify && { notify: bill.notify }), ...(bill.plan && { plan: bill.plan }), ...(bill.trial && { trial: bill.trial }) } }) });
     } catch (err) {

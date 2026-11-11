@@ -34,7 +34,7 @@ const fakeGemini = {
         if (/şikayət/i.test(text)) return ask({ type: "complaints" });
         if (/naməlum/i.test(text)) return ask({ type: "secrets" });
       }
-      return { text: names.length ? "Salam" : "Məlumata baxmaq üçün hesabınıza daxil olun.", usageMetadata: { totalTokenCount: 10 } };
+      return { text: names.includes("get_my_data") ? "Salam" : "Məlumata baxmaq üçün hesabınıza daxil olun.", usageMetadata: { totalTokenCount: 10 } };
     },
   },
 };
@@ -168,7 +168,7 @@ test("anonim, saxta və bitmiş token: alət verilmir, məlumat gəlmir", async 
   shopCalls.length = 0; geminiSeen.length = 0;
   const anon = await chat("Sifarişim haradadır?");
   assert.match(anon.answer, /daxil olun/); assert.equal(shopCalls.length, 0);
-  assert.deepEqual(geminiSeen.at(-1).names, []);
+  assert.ok(!geminiSeen.at(-1).names.includes("get_my_data"), "şəxsi məlumat aləti verilmir (operator aləti həmişə var)");
   assert.match(geminiSeen.at(-1).system, /daxil olmayıb/);
   const fake = await chat("Sifarişim haradadır?", mod.signIdentity("saxta-sirr", "ali"));
   assert.match(fake.answer, /daxil olun/); assert.equal(fake.identity, "invalid"); assert.equal(shopCalls.length, 0);
