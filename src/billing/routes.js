@@ -1,5 +1,6 @@
 // Balans marşrutları (xidmət açarı ilə: portal çağırır) və ödəniş provayderinin webhook-u.
-import { adminLedger, adminRequests, getAiControl, listRequests, requestTopup, resolveRequest, setAiControl, setSettings, summary, topup } from "./billing.js";
+import { adminLedger, adminRequests, adminSetPlan, entitlements, getAiControl, listRequests, planReminders, quoteOrder, requestOrder, requestTopup, resolveRequest, setAiControl, setNextPlan, setSettings, summary, topup } from "./billing.js";
+import { getCatalog, setCatalog } from "./plans.js";
 import { activeProvider, getProvider } from "./providers.js";
 import { store } from "./storage.js";
 import { fromMicro } from "./pricing.js";
@@ -29,6 +30,36 @@ export function registerBillingRoutes(app, { serviceAuth, customerTenant }) {
     }
     res.status(201).json({ request, provider: provider.name, instructions: provider.instructions?.() ?? "" });
   }));
+
+  // Abunə: plan/paket sifarişi (məbləğ serverdə hesablanır). dryRun=1 yalnız qiyməti qaytarır.
+  app.post(`${base}/order`, serviceAuth, customerTenant, wrap(async (req, res) => {
+    const input = { kind: req.body?.kind, plan: req.body?.plan, cycle: req.body?.cycle, pack: req.body?.pack };
+    if (req.query.dryRun === "1") return res.json({ quote: await quoteOrder(req.tenant.tenantId, input) });
+    const provider = activeProvider();
+    const request = await requestOrder(req.tenant.tenantId, input, { provider: provider.name });
+    if (provider.createCheckout) {
+      const { url } = await provider.createCheckout({ tenantId: req.tenant.tenantId, amountAzn: request.amountAzn, requestId: request.id });
+      return res.status(201).json({ request, provider: provider.name, checkoutUrl: url });
+    }
+    res.status(201).json({ request, provider: provider.name, instructions: provider.instructions?.() ?? "" });
+  }));
+  // Növbəti dövrdən başqa plana keçid (plan: null — ləğv)
+  app.post(`${base}/plan/next`, serviceAuth, customerTenant, wrap(async (req, res) => {
+    const plan = req.body?.plan === null || req.body?.plan === undefined ? null : String(req.body.plan).slice(0, 20);
+    res.json(await setNextPlan(req.tenant.tenantId, plan));
+  }));
+  // Admin: plan vermək/götürmək
+  app.post(`${base}/plan/assign`, serviceAuth, customerTenant, wrap(async (req, res) => {
+    const { plan, days, note, by } = req.body ?? {};
+    res.json(await adminSetPlan(req.tenant.tenantId, { plan: plan === null ? null : String(plan ?? "").slice(0, 20), days, note: String(note ?? "").slice(0, 200), by }));
+  }));
+  app.get(`${base}/entitlements`, serviceAuth, customerTenant, wrap(async (req, res) => res.json(await entitlements(req.tenant.tenantId))));
+
+  // Plan kataloqu (qiymət, limit, imkanlar): oxumaq hamıya (sayt qiymət bölməsi), dəyişmək admin
+  app.get("/v1/service/billing/plans", serviceAuth, wrap(async (_req, res) => res.json(await getCatalog())));
+  app.put("/v1/service/billing/plans", serviceAuth, wrap(async (req, res) => res.json(await setCatalog(req.body ?? {}))));
+  // Portal saatlıq çağırır: bitməyə yaxın və bitmiş abunələr (hər biri bir dəfə)
+  app.post("/v1/service/billing/plan-reminders", serviceAuth, wrap(async (_req, res) => res.json({ reminders: await planReminders() })));
 
   // Admin: əl ilə yükləmə / düzəliş
   app.post(`${base}/topup`, serviceAuth, customerTenant, wrap(async (req, res) => {
@@ -65,6 +96,14 @@ export function registerBillingRoutes(app, { serviceAuth, customerTenant }) {
     if (!p?.handleWebhook) return res.status(404).json({ error: "Provayder tapılmadı" });
     const evt = await p.handleWebhook(req);
     if (!evt) return res.status(400).json({ error: "Etibarsız xəbər" });
+    // Plan/paket sifarişi: ödəniş sifarişin özüdür (balansa yazılmır), təsdiq onu tətbiq edir
+    const order = evt.requestId ? await store().getReq(String(evt.requestId)) : null;
+    if (order && (order.kind === "plan" || order.kind === "pack")) {
+      if (order.tenantId !== evt.tenantId || Math.abs(order.amount - Math.round(evt.amountAzn * 1e6)) > 10_000) return res.status(400).json({ error: "Sifariş uyğun gəlmir" });
+      const dup = order.status === "approved";
+      if (!dup) await resolveRequest(order._id, "approve", p.name);
+      return res.json({ ok: true, duplicate: dup });
+    }
     const out = await topup(evt.tenantId, evt.amountAzn, { note: `Ödəniş (${p.name})`, by: p.name, ref: `pay:${p.name}:${evt.ref}` });
     if (evt.requestId) { try { await resolveRequest(evt.requestId, "approve", p.name); } catch { /* sorğu yoxdur/artıq həll olunub */ } }
     res.json({ ok: true, duplicate: out.duplicate });

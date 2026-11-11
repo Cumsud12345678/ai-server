@@ -8,6 +8,7 @@
 import { randomUUID } from "node:crypto";
 import { MICRO, billedMicro, config, fromMicro, toMicro } from "./pricing.js";
 import { store } from "./storage.js";
+import { adminSub, applyOrder, entitlementsOf, getCatalog, packLeft, quotaLeft, quote, rollWindow, subLive, subView, trialLeft } from "./plans.js";
 
 const month = () => new Date().toISOString().slice(0, 7);
 const today = () => new Date().toISOString().slice(0, 10);
@@ -32,7 +33,10 @@ async function ensure(tenantId) {
   const st = store();
   let acc = await st.getAcc(tenantId);
   if (!acc) {
-    await st.createAcc({ _id: tenantId, free: toMicro(config.freeAzn()), freeMonth: month(), paid: 0, lots: [], creditLimit: 0, markup: null, spent: 0, notified: { low: false, empty: false }, v: 0, createdAt: new Date().toISOString() });
+    // Pulsuz sınaq: N cavab, D gün ərzində (hansı tez bitsə)
+    const n = config.trialReplies(), days = config.trialDays();
+    const trial = n > 0 ? { left: n, total: n, until: days > 0 ? new Date(Date.now() + days * 86_400_000).toISOString() : null, notified: false } : null;
+    await st.createAcc({ _id: tenantId, free: toMicro(config.freeAzn()), freeMonth: month(), paid: 0, lots: [], creditLimit: 0, markup: null, spent: 0, notified: { low: false, empty: false }, ...(trial && { trial }), v: 0, createdAt: new Date().toISOString() });
     acc = await st.getAcc(tenantId);
   }
   // Köhnə hesab (partiyasız): mövcud yüklənmiş balans bir partiya olur, müddət bu andan sayılır (müştəri itirmir)
@@ -56,6 +60,13 @@ async function ensure(tenantId) {
       break;
     }
     await backoff(i);
+    acc = await st.getAcc(tenantId);
+  }
+  // Abunə: limit pəncərəsi keçibsə sıfırlanır (illik planda hər 30 gün)
+  for (let i = 0; i < MAX_TRIES; i++) {
+    const rolled = rollWindow(acc.sub);
+    if (!rolled) break;
+    if (await st.casAcc(tenantId, acc.v, { sub: rolled })) { acc = { ...acc, sub: rolled, v: acc.v + 1 }; break; }
     acc = await st.getAcc(tenantId);
   }
   // Aylıq yenilənən pulsuz məbləğ: yığılmır, hər ay təzədən başlayır
@@ -97,7 +108,7 @@ const dailyLimitOf = (acc) => (acc.dailyLimit != null ? acc.dailyLimit : toMicro
  * Sorğudan əvvəl yoxlama (sıra ilə): ümumi AI açarı, hesabın dayandırılması, balans (və kredit limiti), gündəlik xərc tavanı.
  * Gündəlik tavan balansdan asılı deyil: botun sui-istifadəsi və ya ilişib qalan inteqrasiya bir gündə balansı yandırmasın.
  */
-export async function canSpend(tenant) {
+export async function canSpend(tenant, { reply = true } = {}) {
   const control = await getAiControl();
   if (control.paused) return { ok: false, code: "AI_PAUSED", message: "AI müvəqqəti dayandırılıb" };
   if (tenant?.suspended) return { ok: false, code: "TENANT_SUSPENDED", message: "Hesab müvəqqəti dayandırılıb" };
@@ -108,7 +119,17 @@ export async function canSpend(tenant) {
     if ((day?.billed ?? 0) >= limit) return { ok: false, code: "DAILY_LIMIT", message: "Gündəlik xərc limitinə çatılıb" };
   }
   if (!config.enforce()) return { ok: true };
+  // Abunə: plan limiti və ya əlavə paket. Köməkçi xərclər (səs, operator qaralaması, analiz) planın içindədir.
+  const cat = await getCatalog();
+  if (subLive(acc.sub, cat)) {
+    if (!reply || quotaLeft(acc.sub) > 0 || packLeft(acc.packs) > 0) return { ok: true };
+    if (available(acc) > 0) return { ok: true };
+    return { ok: false, code: "PLAN_LIMIT", message: "Planın cavab limiti dolub" };
+  }
+  if (trialLeft(acc) > 0) return { ok: true };
   if (available(acc) > 0) return { ok: true };
+  if (acc.sub?.plan) return { ok: false, code: "PLAN_EXPIRED", message: "Planın müddəti bitib" };
+  if (acc.trial) return { ok: false, code: "TRIAL_ENDED", message: "Pulsuz sınaq bitib" };
   return { ok: false, code: "BALANCE_EMPTY", message: "Balans bitib" };
 }
 
@@ -116,12 +137,20 @@ export async function canSpend(tenant) {
  * Sorğudan sonra: real xərci yazır. Qaytarır { billedAzn, balanceAzn, state, notify? }.
  * notify ("low" | "empty") yalnız həmin vəziyyətə İLK keçiddə verilir: portal bundan email göndərir.
  */
-export async function charge(tenant, { costUsd = 0, tokens = 0, requests = 1 } = {}) {
+export async function charge(tenant, { costUsd = 0, tokens = 0, requests = 1, reply = false } = {}) {
   const st = store();
   const tenantId = tenant.tenantId;
   let acc = await ensure(tenantId);
   const billed = billedMicro(costUsd, acc.markup ?? config.markup());
   const rawCost = billedMicro(costUsd, 1);
+  const cat = await getCatalog();
+  if (subLive(acc.sub, cat)) {
+    const r = await chargePlan(tenantId, acc, { reply, rawCost, requests, tokens });
+    if (r) return r;
+  } else if (trialLeft(acc) > 0) {
+    const r = await chargeTrial(tenantId, acc, { reply, rawCost, requests, tokens });
+    if (r) return r;
+  }
   await st.incDay(tenantId, today(), { billed, cost: rawCost, requests, tokens });
   if (billed <= 0) return { billedAzn: 0, balanceAzn: fromMicro(acc.free + acc.paid), state: stateOf(acc) };
 
@@ -151,6 +180,167 @@ export async function charge(tenant, { costUsd = 0, tokens = 0, requests = 1 } =
   await st.casAcc(tenantId, a.v, { free: a.free - fromFree, paid: a.paid - (billed - fromFree), lots: fitLots(a.lots, a.paid - (billed - fromFree)), spent: (a.spent ?? 0) + billed });
   if (fromFree > 0) await st.incDay(tenantId, today(), { free: fromFree }).catch(() => {});
   return { billedAzn: fromMicro(billed), balanceAzn: fromMicro(a.free + a.paid - billed), state: "ok" };
+}
+
+/**
+ * Abunə ilə ödəniş: cavab plan limitindən, o bitəndə əlavə paketdən çıxılır (pul çıxılmır, real xərc hesabata yazılır).
+ * Hər ikisi bitibsə null: çağıran tərəf balansa keçir (köhnə balans varsa). 80% və 100%-də bir dəfə xəbər verir.
+ */
+async function chargePlan(tenantId, acc, { reply, rawCost, requests, tokens }) {
+  const st = store();
+  for (let i = 0; i < MAX_TRIES; i++) {
+    const sub = acc.sub;
+    const now = Date.now();
+    let patch = null, notify;
+    if (!reply) patch = {}; // köməkçi xərc: planın içində
+    else if (quotaLeft(sub) > 0) {
+      const used = (sub.used ?? 0) + 1;
+      const notified = { ...(sub.notified ?? {}) };
+      const extra = packLeft(acc.packs, now);
+      if (used >= sub.included && extra <= 0 && !notified.u100) { notified.u100 = true; notified.u80 = true; notify = "usage100"; }
+      else if (used >= Math.ceil(sub.included * 0.8) && !notified.u80) { notified.u80 = true; notify = "usage80"; }
+      patch = { sub: { ...sub, used, notified } };
+    } else if (packLeft(acc.packs, now) > 0) {
+      // Paket: bitməyə ən yaxın birinci
+      const packs = [...acc.packs].filter((p) => p.left > 0 && (!p.exp || Date.parse(p.exp) > now)).sort((a, b) => ((a.exp ?? "9999") < (b.exp ?? "9999") ? -1 : 1));
+      packs[0] = { ...packs[0], left: packs[0].left - 1 };
+      const left = packs.reduce((s, p) => s + p.left, 0);
+      const notified = { ...(sub.notified ?? {}) };
+      if (left <= 0 && !notified.u100) { notified.u100 = true; notify = "usage100"; }
+      patch = { packs: packs.filter((p) => p.left > 0), sub: { ...sub, notified } };
+    } else return null;
+    if (!Object.keys(patch).length || (await st.casAcc(tenantId, acc.v, patch))) {
+      await st.incDay(tenantId, today(), { billed: 0, cost: rawCost, requests, tokens, ...(reply && { planReplies: 1 }) });
+      const after = { ...acc, ...patch };
+      return {
+        billedAzn: 0, balanceAzn: fromMicro(acc.free + acc.paid), state: "ok",
+        plan: { used: after.sub.used ?? 0, included: after.sub.included ?? 0, packLeft: packLeft(after.packs) },
+        ...(notify && { notify }),
+      };
+    }
+    await backoff(i);
+    acc = await st.getAcc(tenantId);
+  }
+  return null;
+}
+
+/** Pulsuz sınaq: hər cavab sınaq sayından çıxılır; bitəndə bir dəfə "trialEnd" xəbəri */
+async function chargeTrial(tenantId, acc, { reply, rawCost, requests, tokens }) {
+  const st = store();
+  for (let i = 0; i < MAX_TRIES; i++) {
+    if (trialLeft(acc) <= 0) return null;
+    let patch = {}, notify;
+    if (reply) {
+      const left = acc.trial.left - 1;
+      const notified = left <= 0 ? true : Boolean(acc.trial.notified);
+      if (left <= 0 && !acc.trial.notified) notify = "trialEnd";
+      patch = { trial: { ...acc.trial, left, notified } };
+    }
+    if (!reply || (await st.casAcc(tenantId, acc.v, patch))) {
+      await st.incDay(tenantId, today(), { billed: 0, cost: rawCost, requests, tokens, ...(reply && { trialReplies: 1 }) });
+      const left = reply ? patch.trial.left : acc.trial.left;
+      return { billedAzn: 0, balanceAzn: fromMicro(acc.free + acc.paid), state: "ok", trial: { left, total: acc.trial.total ?? 0 }, ...(notify && { notify }) };
+    }
+    await backoff(i);
+    acc = await st.getAcc(tenantId);
+  }
+  return null;
+}
+
+// ---- Abunə sifarişləri ----
+const planReq = (r) => ({ kind: r.kind ?? "topup", ...(r.plan && { plan: r.plan }), ...(r.cycle && { cycle: r.cycle }), ...(r.type && { orderType: r.type }), ...(r.pack && { pack: r.pack }), ...(r.replies && { replies: r.replies }) });
+
+/** Müştəri plan və ya paket sifariş edir: məbləğ serverdə hesablanır, ödəniş təsdiqlənəndə tətbiq olunur */
+export async function requestOrder(tenantId, input, { provider = "manual" } = {}) {
+  const st = store();
+  const acc = await ensure(tenantId);
+  const cat = await getCatalog();
+  const q = quote(acc, cat, input);
+  const pending = await st.listReqs({ tenantId, status: "pending", limit: 10 });
+  if (pending.length >= 3) throw Object.assign(new Error("Gözləyən 3 sifarişin var. Əvvəlcə onlar həll olunmalıdır"), { status: 429 });
+  const req = { _id: randomUUID(), tenantId, amount: toMicro(q.amountAzn), status: "pending", provider, at: new Date().toISOString(), ...q };
+  await st.insertReq(req);
+  return publicReq(req);
+}
+
+/** Sifarişin qiymətini göstərmək üçün (heç nə yaratmır) */
+export async function quoteOrder(tenantId, input) {
+  const acc = await ensure(tenantId);
+  return quote(acc, await getCatalog(), input);
+}
+
+/** Təsdiqlənmiş plan/paket sifarişini hesaba tətbiq edir (ledger ref ilə təkrar tətbiq olunmur) */
+async function applyPlanOrder(r, by) {
+  const st = store();
+  const cat = await getCatalog();
+  const fresh = await addLedger({ ref: `req:${r._id}`, tenantId: r.tenantId, type: r.kind === "pack" ? "pack" : "plan", amount: r.amount, note: r.kind === "pack" ? `Əlavə paket: +${r.replies} cavab` : `Plan: ${r.plan} (${r.cycle === "year" ? "illik" : "aylıq"}${r.type === "upgrade" ? ", yüksəltmə" : r.type === "renew" ? ", yeniləmə" : ""})`, by: String(by).slice(0, 80) });
+  if (!fresh) return false;
+  for (let i = 0; i < MAX_TRIES; i++) {
+    const acc = await ensure(r.tenantId);
+    const patch = applyOrder(acc, cat, { ...r, id: r._id });
+    if (await st.casAcc(r.tenantId, acc.v, patch)) return true;
+    await backoff(i);
+  }
+  return true;
+}
+
+/** Növbəti dövrdən ucuz plana keçid (ödənişsiz qeyd) və ya ləğvi (null) */
+export async function setNextPlan(tenantId, planId) {
+  const st = store();
+  const cat = await getCatalog();
+  for (let i = 0; i < MAX_TRIES; i++) {
+    const acc = await ensure(tenantId);
+    if (!subLive(acc.sub, cat)) throw Object.assign(new Error("Aktiv plan yoxdur"), { status: 409 });
+    if (planId !== null && !cat.plans.some((p) => p.id === planId)) throw Object.assign(new Error("Plan tapılmadı"), { status: 400 });
+    const sub = { ...acc.sub, next: planId === acc.sub.plan ? null : planId };
+    if (await st.casAcc(tenantId, acc.v, { sub })) return subView({ ...acc, sub }, cat);
+    await backoff(i);
+  }
+  throw Object.assign(new Error("Yenidən cəhd edin"), { status: 503 });
+}
+
+/** Admin: müştəriyə plan verir (pulsuz/endirimli) və ya planı götürür (plan: null) */
+export async function adminSetPlan(tenantId, { plan, days, note = "", by = "" }) {
+  const st = store();
+  const cat = await getCatalog();
+  for (let i = 0; i < MAX_TRIES; i++) {
+    const acc = await ensure(tenantId);
+    const sub = plan === null ? null : adminSub(cat, { plan, days });
+    if (await st.casAcc(tenantId, acc.v, { sub })) {
+      await addLedger({ tenantId, type: "plan", amount: 0, note: plan === null ? `Plan admin tərəfindən götürüldü${note ? `: ${note}` : ""}` : `Admin plan verdi: ${plan}, ${days} gün${note ? ` — ${note}` : ""}`, by: String(by).slice(0, 80) });
+      return subView({ ...acc, sub }, cat);
+    }
+    await backoff(i);
+  }
+  throw Object.assign(new Error("Yenidən cəhd edin"), { status: 503 });
+}
+
+/** Portal üçün: müştərinin imkanları (keşlənir) */
+export async function entitlements(tenantId) {
+  const acc = await ensure(tenantId);
+  return entitlementsOf(acc, await getCatalog());
+}
+
+/**
+ * Xatırlatmalar: bitməsinə ≤3 gün qalan (expiring) və güzəşti bitmiş (expired) abunələr. Hər biri bir dəfə qaytarılır
+ * (bayraq CAS ilə qoyulur): portal saatlıq yoxlamada e-poçt göndərir.
+ */
+export async function planReminders(now = Date.now()) {
+  const st = store();
+  const cat = await getCatalog();
+  const out = [];
+  for (const a of await st.listAccounts()) {
+    const sub = a.sub;
+    if (!sub?.plan) continue;
+    const end = Date.parse(sub.end);
+    let kind = null;
+    if (now > end + cat.graceDays * 86_400_000 && !sub.notified?.expired) kind = "expired";
+    else if (now < end && end - now <= 3 * 86_400_000 && !sub.notified?.expiring) kind = "expiring";
+    if (!kind) continue;
+    const next = { ...sub, notified: { ...(sub.notified ?? {}), [kind]: true, ...(kind === "expired" && { expiring: true }) } };
+    if (await st.casAcc(a._id, a.v, { sub: next })) out.push({ tenantId: a._id, kind, plan: sub.plan, planName: cat.plans.find((p) => p.id === sub.plan)?.name ?? sub.plan, end: sub.end, next: sub.next ?? null });
+  }
+  return out;
 }
 
 async function addLedger({ ref, ...entry }) {
@@ -227,7 +417,7 @@ export async function requestTopup(tenantId, amountAzn, { provider = "manual" } 
   return publicReq(req);
 }
 
-const publicReq = (r) => ({ id: r._id, tenantId: r.tenantId, amountAzn: fromMicro(r.amount), status: r.status, provider: r.provider, at: r.at, ...(r.note && { note: r.note }) });
+const publicReq = (r) => ({ id: r._id, tenantId: r.tenantId, amountAzn: fromMicro(r.amount), status: r.status, provider: r.provider, at: r.at, ...(r.note && { note: r.note }), ...planReq(r) });
 
 export async function listRequests(opts) { return (await store().listReqs(opts)).map(publicReq); }
 
@@ -266,6 +456,11 @@ export async function resolveRequest(id, action, by = "") {
   if (!r) throw Object.assign(new Error("Sorğu tapılmadı"), { status: 404 });
   if (action === "approve") {
     if (r.status === "rejected") throw Object.assign(new Error("Sorğu artıq rədd edilib"), { status: 409 });
+    if (r.kind === "plan" || r.kind === "pack") {
+      const applied = await applyPlanOrder(r, by);
+      await st.setReqStatus(id, "pending", "approved", { resolvedAt: new Date().toISOString(), resolvedBy: by });
+      return { request: publicReq({ ...r, status: "approved" }), duplicate: !applied, ...(await summary(r.tenantId)) };
+    }
     const res = await topup(r.tenantId, fromMicro(r.amount), { note: "Yükləmə təsdiqləndi", by, ref: `req:${id}` }); // təkrar təsdiq pul əlavə etmir
     await st.setReqStatus(id, "pending", "approved", { resolvedAt: new Date().toISOString(), resolvedBy: by });
     return { request: publicReq({ ...r, status: "approved" }), ...res };
@@ -327,6 +522,7 @@ export async function summary(tenantId, { admin = false, history = true } = {}) 
       projectedMonthAzn: thisMonth.billed > 0 ? fromMicro((thisMonth.billed / dayOfMonth) * dim) : null,
     },
     pendingRequests: (await st.listReqs({ tenantId, status: "pending", limit: 5 })).map(publicReq),
+    ...subView(acc, await getCatalog()),
   };
   if (history) {
     out.days = days.slice(0, 30).map((d) => ({ date: d.date, spentAzn: fromMicro(d.billed), requests: d.requests }));

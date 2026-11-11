@@ -13,7 +13,7 @@ import { advise } from "./ai/advisor.js";
 import { analyzeTopics, MIN_QUESTIONS } from "./queries/insights.js";
 import { maskPII, queryTrend, questionSample, recordQuery, recordClick, listQueries, queryStats, clearQueries, listConversations, getConversation } from "./queries/queries.js";
 import { checkAndCount, addTokens, getUsage, getUsageSummary, deleteTenantUsage } from "./usage/usage.js";
-import { canSpend, charge, deleteTenantBilling } from "./billing/billing.js";
+import { canSpend, charge, deleteTenantBilling, entitlements } from "./billing/billing.js";
 import { registerBillingRoutes } from "./billing/routes.js";
 import { sanitizeFilters, compileSchema } from "./data/filters.js";
 import { createRestRepo, LOCAL_SORTABLE_FIELDS } from "./connectors/restRepo.js";
@@ -443,12 +443,14 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
     try {
       const hist = Array.isArray(history) ? history : [];
       // Ziyarətçinin kimliyi yalnız saytın imzaladığı tokendən gəlir; səhv/bitmiş token = anonim (söhbət işləməyə davam edir)
-      const identity = identityToken ? verifyIdentity(req.tenant, identityToken) : null;
+      // Plan imkanları: əməliyyatlar və müştəri məlumatı (kimlik) yalnız uyğun planda işləyir
+      const feats = (await entitlements(req.tenant.tenantId).catch(() => null))?.features ?? {};
+      const identity = identityToken && feats.customerData !== false ? verifyIdentity(req.tenant, identityToken) : null;
       const support = req.tenant.profile?.mode === "support";
       // Əməliyyat təklifi yalnız portal üzərindən (təsdiq də orada olur) və yalnız söhbət ID-si varsa
       const cleanSid = typeof sid === "string" && /^[\w.:-]{6,100}$/.test(sid) ? sid : null;
       const channel = ["widget", "telegram", "whatsapp"].includes(req.body?.channel) ? req.body.channel : "widget";
-      const actionCtx = req.viaPortal && cleanSid ? { sid: cleanSid, channel } : {};
+      const actionCtx = req.viaPortal && cleanSid && feats.actions !== false ? { sid: cleanSid, channel } : {};
       // Şəkil əvvəl mətnə çevrilir; sonrakı axın dəyişməz qalır
       let vision = null;
       if (image) {
@@ -476,7 +478,7 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
       await addTokens(req.tenant, r.tokens);
       mark("tokens");
       let bill;
-      try { bill = await charge(req.tenant, { costUsd: r.costUsd ?? 0, tokens: r.tokens ?? 0 }); }
+      try { bill = await charge(req.tenant, { costUsd: r.costUsd ?? 0, tokens: r.tokens ?? 0, reply: true }); }
       catch (e) { console.error(`[billing] ${req.tenant.tenantId}: xərc yazıla bilmədi:`, e.message); } // cavab itməsin
       mark("charge");
       // results: >0 elan, 0 axtarış aparıldı amma tapılmadı, -1 axtarışsız cavab (ümumi sual və s.), -2 operatora yönləndirildi
@@ -486,7 +488,7 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
       mark("log"); slowLog("ok");
       res.json({ answer: r.answer, listings: r.listings ?? [], ...(vision && { imageNote: vision.description.slice(0, 200) }), ...(r.sources && { sources: r.sources }), ...(r.unanswered && { unanswered: true }), ...(r.handoff && { handoff: true }), ...(r.confirm && { confirm: r.confirm }), ...(identityToken && !identity && { identity: "invalid" }), usage: { tokens: r.tokens },
         // Balans vəziyyəti yalnız portala verilir (müştərinin açıq API-sində görünmür)
-        ...(req.viaPortal && bill && { billing: { state: bill.state, balanceAzn: bill.balanceAzn, billedAzn: bill.billedAzn, ...(bill.notify && { notify: bill.notify }) } }) });
+        ...(req.viaPortal && bill && { billing: { state: bill.state, balanceAzn: bill.balanceAzn, billedAzn: bill.billedAzn, ...(bill.notify && { notify: bill.notify }), ...(bill.plan && { plan: bill.plan }), ...(bill.trial && { trial: bill.trial }) } }) });
     } catch (err) {
       console.error(`[chat] ${req.tenant.tenantId}:`, err.status ?? "", err.message);
       slowLog("xəta");
@@ -517,7 +519,7 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
     const v = validateAudio(req.body?.audio);
     if (v.error) return res.status(400).json({ error: v.error, code: "BAD_AUDIO" });
     try {
-      const funds = await canSpend(req.tenant);
+      const funds = await canSpend(req.tenant, { reply: false });
       if (!funds.ok) return res.status(402).json({ error: funds.message, code: funds.code });
       const r = await transcribeFn({ audio: v });
       await addTokens(req.tenant, r.tokens);
@@ -666,7 +668,7 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
       const asked = items.reduce((a, x) => a + x.count, 0);
       const disliked = (Array.isArray(req.body?.disliked) ? req.body.disliked : []).filter((q) => typeof q === "string" && q.trim()).slice(0, 20).map((q) => ({ text: maskPII(q.trim()).slice(0, 150), count: 1, unanswered: 0, disliked: 1 }));
       if (asked < MIN_QUESTIONS) return res.json({ tooFew: true, asked, topics: [], gaps: [], minQuestions: MIN_QUESTIONS });
-      const funds = await canSpend(req.tenant);
+      const funds = await canSpend(req.tenant, { reply: false });
       if (!funds.ok) return res.status(402).json({ error: funds.message, code: funds.code });
       const r = await insightsFn({ items: [...items.slice(0, 150 - disliked.length), ...disliked], language: req.tenant.profile?.language ?? "az" });
       await addTokens(req.tenant, r.tokens);
@@ -683,7 +685,7 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
   // Operator köməkçisi: canlı söhbət üçün cavab qaralaması (balansdan çıxılır; heç nə ziyarətçiyə getmir)
   app.post("/v1/service/tenants/:tenantId/draft", serviceAuth, customerTenant, async (req, res) => {
     if (!validDraftInput(req.body)) return res.status(400).json({ error: "messages düzgün deyil" });
-    const funds = await canSpend(req.tenant);
+    const funds = await canSpend(req.tenant, { reply: false });
     if (!funds.ok) return res.status(402).json({ error: funds.message, code: funds.code });
     try {
       const r = await draftFn({ tenant: req.tenant, messages: req.body.messages.slice(-12).map((m) => ({ from: m.from, text: m.text.slice(0, 600) })), context: (req.body.context ?? []).slice(-6).map((m) => ({ role: m.role, text: m.text.slice(0, 400) })) });

@@ -1,4 +1,5 @@
 // Admin: müştərinin dayandırılması (bütün sorğular 402 TENANT_SUSPENDED) və maliyyə hesabatı (pul girişi, xərc, mənfəət, model üzrə).
+import "./helpers/legacy-balance.mjs";
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startMock, demoTenant, tmpFile } from "../testkit/helpers.mjs";

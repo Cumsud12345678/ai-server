@@ -1,4 +1,5 @@
 // Admin: ümumi AI açarı, müştəri başına gündəlik xərc limiti, Ödənişlər səhifəsi üçün sorğu və balans hərəkətləri siyahısı.
+import { legacyBalanceEnv } from "./helpers/legacy-balance.mjs";
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startMock, demoTenant, tmpFile } from "../testkit/helpers.mjs";
@@ -18,6 +19,7 @@ before(async () => {
   process.env.USAGE_FILE = tmpFile("usage-ctl.json", "{}");
   process.env.BILLING_FILE = tmpFile("billing-ctl.json", "{}");
   for (const k of ["BILLING_MARKUP", "USD_AZN_RATE", "BILLING_ENFORCE", "BILLING_FREE_AZN", "BILLING_DAILY_LIMIT_AZN"]) delete process.env[k];
+  legacyBalanceEnv();
   const source = structuredClone(demoTenant(mock.url).source);
   source.auth = { type: "header", name: "X-Api-Key" };
   const config = { businessName: "Ctl", domain: "ctl.az", profile: { language: "az", maxResults: 5 }, source, apiSecret: "test-secret" };

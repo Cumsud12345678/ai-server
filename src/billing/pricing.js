@@ -78,7 +78,11 @@ const envNum = (name, d) => (process.env[name] !== undefined && process.env[name
 export const config = {
   markup: () => envNum("BILLING_MARKUP", 1.5),          // həqiqi xərcə vurulan əmsal
   usdAzn: () => envNum("USD_AZN_RATE", 1.7),            // AZN dollara sabitlənib
-  freeAzn: () => envNum("BILLING_FREE_AZN", 2),          // pulsuz məbləğ (müştəriyə yazılan manatla)
+  // Köhnə pulsuz balans (AZN). Abunə modelində 0: yerinə pulsuz sınaq cavabları verilir (aşağıda)
+  freeAzn: () => envNum("BILLING_FREE_AZN", 0),
+  // Pulsuz sınaq: yeni hesaba N cavab, D gün ərzində (hansı tez bitsə). 0 gün = müddətsiz
+  trialReplies: () => Math.max(0, Math.round(envNum("BILLING_TRIAL_REPLIES", 100))),
+  trialDays: () => Math.max(0, Math.round(envNum("BILLING_TRIAL_DAYS", 14))),
   freePeriod: () => (process.env.BILLING_FREE_PERIOD === "once" ? "once" : "monthly"),
   // Yüklənmiş balansın istifadə müddəti (gün): hər yükləmənin öz müddəti var, xərclənməyən hissə sonra yanır. 0 = müddətsiz
   topupExpiryDays: () => Math.max(0, Math.round(envNum("BILLING_TOPUP_EXPIRY_DAYS", 365))),

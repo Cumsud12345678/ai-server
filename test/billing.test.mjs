@@ -1,4 +1,5 @@
 // Balans: xərc hesabı, pulsuz məbləğ → yüklənmiş balans sırası, dayanma, bildiriş keçidləri, təkrar-qoruma, rəqabət.
+import { legacyBalanceEnv } from "./helpers/legacy-balance.mjs";
 import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { tmpFile } from "../testkit/helpers.mjs";
@@ -18,6 +19,7 @@ const modes = {
 
 beforeEach(() => {
   for (const k of ["BILLING_TOPUP_EXPIRY_DAYS", "BILLING_MARKUP", "USD_AZN_RATE", "BILLING_FREE_AZN", "BILLING_FREE_PERIOD", "BILLING_LOW_AZN", "BILLING_ENFORCE", "GEMINI_PRICES", "BILLING_MIN_TOPUP_AZN"]) delete process.env[k];
+  legacyBalanceEnv();
   // testlər Gemini qiymət cədvəli ilə yazılıb (defolt indi Haiku tarifidir)
   process.env.GEMINI_PRICES = JSON.stringify({ "gemini-3.5-flash": { in: 1.5, out: 9, cachedIn: 0.15 }, "gemini-3-flash-preview": { in: 0.5, out: 3, cachedIn: 0.05 }, "*": { in: 1.5, out: 9, cachedIn: 0.15 } });
 });

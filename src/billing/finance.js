@@ -7,7 +7,8 @@
 //   free     — billed-in pulsuz aylıq hissədən çıxılan hissəsi (gəlir deyil). Bu sahə yeni yazılır: köhnə günlərdə 0-dır
 //   cost     — provayderə (Claude/Gemini) ödənən real xərc, vuruqsuz
 //   expired  — müddəti bitib yanan yüklənmiş balans (pul artıq daxil olub, xidmət göstərilməyib: gəlirə yazılır)
-//   profit   — (billed − free + expired) − cost
+//   subs     — plan və əlavə paket ödənişləri (abunə gəliri: ödənildiyi ayda tam yazılır)
+//   profit   — (billed − free + expired + subs) − cost
 import { config, fromMicro } from "./pricing.js";
 import { store } from "./storage.js";
 
@@ -30,7 +31,7 @@ export async function finance({ months = 6 } = {}) {
   const st = store();
   const [ledger, days, models, accounts] = await Promise.all([st.listAllLedger(), st.listAllDays(`${keys[0]}-01`), st.listModels(keys[0]), st.listAccounts()]);
 
-  const blank = () => ({ paid: 0, manual: 0, adjust: 0, billed: 0, free: 0, cost: 0, requests: 0, expired: 0 });
+  const blank = () => ({ paid: 0, manual: 0, adjust: 0, billed: 0, free: 0, cost: 0, requests: 0, expired: 0, subs: 0 });
   const byMonth = new Map(keys.map((k) => [k, blank()]));
   let cashIn = 0;
   for (const e of ledger) {
@@ -41,7 +42,7 @@ export async function finance({ months = 6 } = {}) {
     const row = byMonth.get(monthOf(e.at));
     if (!row) continue;
     if (amount < 0) row.adjust += amount;
-    else if (isPayment(e)) row.paid += amount;
+    else if (isPayment(e)) { row.paid += amount; if (e.type === "plan" || e.type === "pack") row.subs += amount; }
     else row.manual += amount;
   }
 
@@ -57,14 +58,23 @@ export async function finance({ months = 6 } = {}) {
     }
   }
 
+  // Son 30 günün abunə ödənişləri (müştəri üzrə mənfəət: plan pulu − real AI xərci)
+  const since30Iso = `${since30}T00:00:00.000Z`;
+  for (const e of ledger) {
+    if ((e.type !== "plan" && e.type !== "pack") || !isPayment(e) || String(e.at) < since30Iso) continue;
+    const t = tenants.get(e.tenantId) ?? { billed: 0, free: 0, cost: 0, requests: 0 };
+    t.subs = (t.subs ?? 0) + (Number(e.amount) || 0);
+    tenants.set(e.tenantId, t);
+  }
+
   const accById = new Map(accounts.map((a) => [a._id, a]));
   const monthRows = keys.map((k) => {
     const r = byMonth.get(k);
-    const revenue = r.billed - r.free + r.expired;
+    const revenue = r.billed - r.free + r.expired + r.subs;
     return {
       month: k,
       cashIn: { paidAzn: azn(r.paid), manualAzn: azn(r.manual), adjustAzn: azn(r.adjust), totalAzn: azn(r.paid + r.manual + r.adjust) },
-      billedAzn: azn(r.billed), freeAzn: azn(r.free), expiredAzn: azn(r.expired), revenueAzn: azn(revenue), costAzn: azn(r.cost), profitAzn: azn(revenue - r.cost),
+      billedAzn: azn(r.billed), freeAzn: azn(r.free), expiredAzn: azn(r.expired), subsAzn: azn(r.subs), revenueAzn: azn(revenue), costAzn: azn(r.cost), profitAzn: azn(revenue - r.cost),
       marginPct: revenue > 0 ? Math.round(((revenue - r.cost) / revenue) * 1000) / 10 : null,
       requests: r.requests,
     };
@@ -80,14 +90,14 @@ export async function finance({ months = 6 } = {}) {
 
   const tenantRows = [...tenants.entries()].map(([tenantId, t]) => {
     const acc = accById.get(tenantId);
-    const revenue = t.billed - t.free;
+    const revenue = t.billed - t.free + (t.subs ?? 0);
     return {
-      tenantId, requests: t.requests,
-      billedAzn: azn(t.billed), freeAzn: azn(t.free), revenueAzn: azn(revenue), costAzn: azn(t.cost), profitAzn: azn(revenue - t.cost),
+      tenantId, requests: t.requests, plan: acc?.sub?.plan ?? null,
+      billedAzn: azn(t.billed), freeAzn: azn(t.free), subsAzn: azn(t.subs ?? 0), revenueAzn: azn(revenue), costAzn: azn(t.cost), profitAzn: azn(revenue - t.cost),
       markup: acc?.markup ?? config.markup(), customMarkup: acc?.markup != null,
       balanceAzn: acc ? azn(acc.free + acc.paid) : 0,
     };
-  }).filter((t) => t.costAzn > 0 || t.billedAzn > 0).sort((a, b) => a.profitAzn - b.profitAzn).slice(0, 100);
+  }).filter((t) => t.costAzn > 0 || t.billedAzn > 0 || t.subsAzn > 0).sort((a, b) => a.profitAzn - b.profitAzn).slice(0, 100);
 
   const cur = byMonth.get(keys[keys.length - 1]);
   return {

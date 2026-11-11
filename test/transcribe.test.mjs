@@ -1,3 +1,4 @@
+import "./helpers/legacy-balance.mjs";
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startMock, demoTenant, tmpFile } from "../testkit/helpers.mjs";
