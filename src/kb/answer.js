@@ -9,6 +9,7 @@ import { newMeter } from "../billing/pricing.js";
 import { maskPII, queryLoggingOn } from "../queries/queries.js";
 import { actionDeclarations, actionsPrompt, isActionTool, runActionTool } from "../actions/actions.js";
 import { ORDER_TOOL, orderDeclaration, orderEnabled, orderPrompt, runOrderTool } from "../orders/orders.js";
+import { bookingDeclarations, bookingPrompt, isBookingTool, runBookingTool } from "../booking/booking.js";
 import { privateDeclarations, privatePrompt, privateToolNames, runPrivateTool } from "../private/privateData.js";
 import { LOOKUP_TOOL, lookupDeclaration, lookupPrompt, lookupReady, runLookupTool } from "../private/orderLookup.js";
 import { HANDOFF_TOOL, handoffDeclaration, handoffPrompt, runHandoff } from "../ai/handoff.js";
@@ -48,7 +49,7 @@ ${p.generalKnowledge === false
 8. Elan və ya məhsul axtarışı, göstərmək və ya satış təklif etmə: bu rejimdə yalnız suallara cavab verirsən. Özünü "məsləhətçi" və ya "elan köməkçisi" kimi təqdim etmə.
 9. Tarixçədəki əvvəlki cavabların qısaldılmış saxlanılır (sonu kəsilmiş ola bilər): bu səhv deyil. Əvvəlki cavabını natamam və ya səhv sayma, üzr istəmə, özbaşına düzəliş etmə; yalnız istifadəçi konkret səhv göstərsə yoxla. "Tamam", "sağ ol" kimi mesajlara bir qısa cümlə ilə cavab ver.
 10. Cavabdan sonra ayrıca sətirdə istifadə etdiyin kontekst nömrələrini yaz, məsələn: [[S:1,3]]. NO_ANSWER halında bunu yazma.
-${styleLines(p, "dostcasına, peşəkar")}${p.extraInstructions ? "\n" + p.extraInstructions : ""}${privatePrompt(tenant, identity)}${sid ? actionsPrompt(tenant, identity) : ""}${orderPrompt(tenant)}${lookup ? lookupPrompt(tenant) : ""}${procedurePrompt(proc)}`;
+${styleLines(p, "dostcasına, peşəkar")}${p.extraInstructions ? "\n" + p.extraInstructions : ""}${privatePrompt(tenant, identity)}${sid ? actionsPrompt(tenant, identity) : ""}${orderPrompt(tenant)}${bookingPrompt(tenant)}${lookup ? lookupPrompt(tenant) : ""}${procedurePrompt(proc)}`;
 }
 
 export const header = (c) => [c.title, c.heading].filter(Boolean).join(" — ");
@@ -100,7 +101,7 @@ const retrievalQuery = (message, history) => {
 };
 
 /** Qaytarır: { answer, sources, unanswered, tokens, costUsd, listings: [] } */
-export async function answerFromKb({ tenant, message, history = [], identity = null, sid = null, channel = null, orderSid = null, lookup = false, handoffRules = null, live = false }, client = geminiClient()) {
+export async function answerFromKb({ tenant, message, history = [], identity = null, sid = null, channel = null, orderSid = null, lookup = false, handoffRules = null, live = false, reach = null }, client = geminiClient()) {
   const found = await searchKb(tenant.tenantId, retrievalQuery(message, history), { k: 5, client });
   const { relevant, weak, empty } = found;
   const proc = procedureHit(found.hits);
@@ -127,7 +128,7 @@ export async function answerFromKb({ tenant, message, history = [], identity = n
       const orderTool = orderDeclaration(tenant);
       const lookupTool = lookup ? lookupDeclaration(tenant) : null;
       // Operator aləti həmişə var: dəstək rejimində də AI müştərini (səbəbi ilə) operatora ötürə bilir
-      const ptools = [...(identity ? privateDeclarations(tenant) : []), ...actionDeclarations(tenant, { identity, sid }), ...(orderTool ? [orderTool] : []), ...(lookupTool ? [lookupTool] : []), handoffDeclaration(handoffRules, { orderForm: Boolean(orderTool) })];
+      const ptools = [...(identity ? privateDeclarations(tenant) : []), ...actionDeclarations(tenant, { identity, sid }), ...(orderTool ? [orderTool] : []), ...bookingDeclarations(tenant), ...(lookupTool ? [lookupTool] : []), handoffDeclaration(handoffRules, { orderForm: Boolean(orderTool) })];
       const conversation = [...history.slice(-8), { role: "user", text: message }];
       const pctx = {};
       const convo = [...contents];
@@ -139,12 +140,12 @@ export async function answerFromKb({ tenant, message, history = [], identity = n
         if (!calls?.length || i >= 3) break;
         convo.push(res.candidates[0].content);
         const parts = [];
-        for (const call of calls) parts.push({ functionResponse: { name: call.name, response: { result: call.name === HANDOFF_TOOL ? runHandoff(call.args, pctx, handoffRules, live) : call.name === ORDER_TOOL ? await runOrderTool(tenant, call.args, pctx, { sid: sid ?? orderSid, channel, conversation }) : call.name === LOOKUP_TOOL && lookupTool ? await runLookupTool(tenant, call.args, pctx, { sid: sid ?? orderSid }) : isActionTool(call.name) ? runActionTool(tenant, identity, call.name, call.args, pctx, { sid, channel }) : privateToolNames.has(call.name) ? await runPrivateTool(tenant, identity, call.name, call.args, pctx) : { error: "Naməlum alət" } } } });
+        for (const call of calls) parts.push({ functionResponse: { name: call.name, response: { result: call.name === HANDOFF_TOOL ? runHandoff(call.args, pctx, handoffRules, live) : call.name === ORDER_TOOL ? await runOrderTool(tenant, call.args, pctx, { sid: sid ?? orderSid, channel, conversation, reach }) : isBookingTool(call.name) ? await runBookingTool(tenant, call.name, call.args, pctx, { sid: sid ?? orderSid, channel, conversation, reach }) : call.name === LOOKUP_TOOL && lookupTool ? await runLookupTool(tenant, call.args, pctx, { sid: sid ?? orderSid }) : isActionTool(call.name) ? runActionTool(tenant, identity, call.name, call.args, pctx, { sid, channel }) : privateToolNames.has(call.name) ? await runPrivateTool(tenant, identity, call.name, call.args, pctx) : { error: "Naməlum alət" } } } });
         convo.push({ role: "user", parts });
       }
       const tokens = meter.tokens, costUsd = meter.costUsd;
       const { answer, noAnswer, used } = parseMarkers(res.text ?? "");
-      const priv = { ...(pctx.private && { private: true }), ...(pctx.pendingAction && { confirm: pctx.pendingAction }), ...(pctx.order && { order: pctx.order }),
+      const priv = { ...(pctx.private && { private: true }), ...(pctx.pendingAction && { confirm: pctx.pendingAction }), ...(pctx.order && { order: pctx.order }), ...(pctx.booking && { booking: pctx.booking }),
         ...(pctx.handoff && { handoff: true, unanswered: true, handoffReason: pctx.handoffReason ?? "asked", ...(pctx.handoffNote && { handoffNote: pctx.handoffNote }) }) };
       // Operatora ötürüldü: cavab mətni boş olsa belə ötürmə qərarı itməsin
       if (pctx.handoff) return { answer: parseMarkers(res.text ?? "").answer || fallbackText(tenant), sources: [], tokens, costUsd, listings: [], ...priv };

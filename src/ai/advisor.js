@@ -9,6 +9,7 @@ import { actionDeclarations, actionsPrompt, hasActions, isActionTool, runActionT
 import { privateDeclarations, privatePrompt, privateToolNames, runPrivateTool } from "../private/privateData.js";
 import { styleLines } from "./style.js";
 import { ORDER_TOOL, orderDeclaration, orderPrompt, runOrderTool } from "../orders/orders.js";
+import { bookingDeclarations, bookingEnabled, bookingPrompt, isBookingTool, runBookingTool } from "../booking/booking.js";
 import { LOOKUP_TOOL, lookupDeclaration, lookupPrompt, runLookupTool } from "../private/orderLookup.js";
 import { HANDOFF_TOOL, handoffDeclaration, handoffPrompt, runHandoff } from "./handoff.js";
 
@@ -112,12 +113,12 @@ async function generateWithRetry(client, params) {
   }
 }
 
-async function runWithModel(client, model, { tenant, repo, system, message, history, meter, identity, live = false, sid = null, channel = null, orderSid = null, lookup = false, handoffRules = null }) {
+async function runWithModel(client, model, { tenant, repo, system, message, history, meter, identity, live = false, sid = null, channel = null, orderSid = null, lookup = false, handoffRules = null, reach = null }) {
   const ctx = { listings: [] };
   const both = tenant.profile?.mode === "both";
   const orderTool = orderDeclaration(tenant);
   const lookupTool = lookup ? lookupDeclaration(tenant) : null;
-  const tools = [buildToolDeclaration(repo.schema), ...(both ? [kbToolDeclaration] : []), ...(identity ? privateDeclarations(tenant) : []), ...actionDeclarations(tenant, { identity, sid }), ...(orderTool ? [orderTool] : []), ...(lookupTool ? [lookupTool] : []), handoffDeclaration(handoffRules, { orderForm: Boolean(orderTool) })];
+  const tools = [buildToolDeclaration(repo.schema), ...(both ? [kbToolDeclaration] : []), ...(identity ? privateDeclarations(tenant) : []), ...actionDeclarations(tenant, { identity, sid }), ...(orderTool ? [orderTool] : []), ...bookingDeclarations(tenant), ...(lookupTool ? [lookupTool] : []), handoffDeclaration(handoffRules, { orderForm: Boolean(orderTool) })];
   const conversation = [...history.slice(-8), { role: "user", text: message }];
   const contents = [
     ...historyContents(history, HISTORY_TURNS, HISTORY_CHARS),
@@ -141,7 +142,7 @@ async function runWithModel(client, model, { tenant, repo, system, message, hist
     contents.push(response.candidates[0].content); // olduğu kimi qaytar
     const parts = [];
     for (const call of calls) {
-      const result = call.name === HANDOFF_TOOL ? runHandoff(call.args, ctx, handoffRules, live) : call.name === kbToolDeclaration.name ? await runKbTool(tenant, call.args, ctx, client) : call.name === ORDER_TOOL ? await runOrderTool(tenant, call.args, ctx, { sid: sid ?? orderSid, channel, conversation }) : call.name === LOOKUP_TOOL && lookupTool ? await runLookupTool(tenant, call.args, ctx, { sid: sid ?? orderSid }) : isActionTool(call.name) ? runActionTool(tenant, identity, call.name, call.args, ctx, { sid, channel }) : privateToolNames.has(call.name) ? await runPrivateTool(tenant, identity, call.name, call.args, ctx) : await runTool(repo, tenant, call.name, call.args, ctx);
+      const result = call.name === HANDOFF_TOOL ? runHandoff(call.args, ctx, handoffRules, live) : call.name === kbToolDeclaration.name ? await runKbTool(tenant, call.args, ctx, client) : call.name === ORDER_TOOL ? await runOrderTool(tenant, call.args, ctx, { sid: sid ?? orderSid, channel, conversation, reach }) : isBookingTool(call.name) ? await runBookingTool(tenant, call.name, call.args, ctx, { sid: sid ?? orderSid, channel, conversation, reach }) : call.name === LOOKUP_TOOL && lookupTool ? await runLookupTool(tenant, call.args, ctx, { sid: sid ?? orderSid }) : isActionTool(call.name) ? runActionTool(tenant, identity, call.name, call.args, ctx, { sid, channel }) : privateToolNames.has(call.name) ? await runPrivateTool(tenant, identity, call.name, call.args, ctx) : await runTool(repo, tenant, call.name, call.args, ctx);
       parts.push({ functionResponse: { name: call.name, response: { result } } });
     }
     contents.push({ role: "user", parts });
@@ -150,18 +151,18 @@ async function runWithModel(client, model, { tenant, repo, system, message, hist
 }
 
 // Qaytarır: { answer, listings, tokens }.  client: test üçün saxta müştəri vermək olar (Gemini formatında)
-export async function advise({ tenant, repo, message, history = [], identity = null, live = false, sid = null, channel = null, orderSid = null, lookup = false, handoffRules = null }, client = defaultClient()) {
+export async function advise({ tenant, repo, message, history = [], identity = null, live = false, sid = null, channel = null, orderSid = null, lookup = false, handoffRules = null, reach = null }, client = defaultClient()) {
   // Eyni sual (söhbət tarixçəsi yoxdur) qısa müddət keşdən verilir: token xərcləmir
-  const key = !identity && !hasActions(tenant) && history.length === 0 && CACHE_TTL_MS > 0 && tenant.profile?.mode !== "both" ? cacheKey(tenant, message, channel) : null;
+  const key = !identity && !hasActions(tenant) && !bookingEnabled(tenant) && history.length === 0 && CACHE_TTL_MS > 0 && tenant.profile?.mode !== "both" ? cacheKey(tenant, message, channel) : null;
   const hit = key && answerCache.get(key);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) return { answer: hit.answer, listings: hit.listings, searched: hit.searched ?? true, tokens: 0, costUsd: 0, cached: true };
 
-  const system = (await buildSystem(tenant, repo, channel)) + privatePrompt(tenant, identity) + (sid ? actionsPrompt(tenant, identity) : "") + orderPrompt(tenant) + (lookup ? lookupPrompt(tenant) : "") + "\n" + handoffPrompt(handoffRules);
+  const system = (await buildSystem(tenant, repo, channel)) + privatePrompt(tenant, identity) + (sid ? actionsPrompt(tenant, identity) : "") + orderPrompt(tenant) + bookingPrompt(tenant) + (lookup ? lookupPrompt(tenant) : "") + "\n" + handoffPrompt(handoffRules);
   const meter = newMeter(); // uğursuz model cəhdlərinin xərci də hesaba düşür
   let lastErr;
   for (const model of chatModels()) {
     try {
-      const { text, ctx } = await runWithModel(client, model, { tenant, repo, system, message, history, meter, identity, live, sid, channel, orderSid, lookup, handoffRules });
+      const { text, ctx } = await runWithModel(client, model, { tenant, repo, system, message, history, meter, identity, live, sid, channel, orderSid, lookup, handoffRules, reach });
       const seen = new Set();
       const shown = pickShown(text, ctx.listings.filter((l) => !seen.has(l.id) && seen.add(l.id)));
       const listings = shown.listings;
@@ -171,7 +172,7 @@ export async function advise({ tenant, repo, message, history = [], identity = n
         answerCache.set(key, { at: Date.now(), answer, listings, searched: Boolean(ctx.searched) });
       }
       const sources = ctx.kbHits?.length ? sourcesOf(ctx.kbHits, []) : [];
-      return { answer, listings, searched: Boolean(ctx.searched), tokens: meter.tokens, costUsd: meter.costUsd, ...(sources.length && { sources }), ...(ctx.handoff && { unanswered: true, handoff: true, handoffReason: ctx.handoffReason ?? "asked", ...(ctx.handoffNote && { handoffNote: ctx.handoffNote }) }), ...(ctx.private && { private: true }), ...(ctx.pendingAction && { confirm: ctx.pendingAction }), ...(ctx.order && { order: ctx.order }) };
+      return { answer, listings, searched: Boolean(ctx.searched), tokens: meter.tokens, costUsd: meter.costUsd, ...(sources.length && { sources }), ...(ctx.handoff && { unanswered: true, handoff: true, handoffReason: ctx.handoffReason ?? "asked", ...(ctx.handoffNote && { handoffNote: ctx.handoffNote }) }), ...(ctx.private && { private: true }), ...(ctx.pendingAction && { confirm: ctx.pendingAction }), ...(ctx.order && { order: ctx.order }), ...(ctx.booking && { booking: ctx.booking }) };
     } catch (err) {
       lastErr = err;
       if (RETRYABLE.includes(err.status)) { console.warn(`[ai] ${model} alınmadı (${err.status}), növbəti model`); continue; }

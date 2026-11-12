@@ -127,7 +127,7 @@ const cleanConvo = (c) => (Array.isArray(c) ? c : []).slice(-10)
   .map((m) => ({ role: m.role, text: m.text.trim().slice(0, 600) }));
 
 /** submit_order: sifarişi müraciətlər qutusuna yazır. ctx.order portala qayıdır (bildiriş üçün). */
-export async function runOrderTool(tenant, args, ctx, { sid = null, channel = null, conversation = [] } = {}) {
+export async function runOrderTool(tenant, args, ctx, { sid = null, channel = null, conversation = [], reach = null } = {}) {
   ctx.private = true; // şəxsi məlumatdır: keşə və sorğu jurnalına düşməsin
   const f = live(tenant);
   if (!f) return { error: "Sifariş qəbulu hazırda söndürülüb. Müştəriyə operatorla əlaqə saxlamağı təklif et." };
@@ -150,7 +150,7 @@ export async function runOrderTool(tenant, args, ctx, { sid = null, channel = nu
     question: `${title}${summary ? `: ${summary}` : ""}`.slice(0, 500),
     conversation: cleanConvo(conversation),
     handled: false, status: "new",
-    order: { title, fields: fields.map(({ label, value }) => ({ label, value })), channel: ["widget", "telegram", "whatsapp", "api"].includes(channel) ? channel : "widget", ...(sid && { sid }) },
+    order: { title, fields: fields.map(({ label, value }) => ({ label, value })), channel: ["widget", "telegram", "whatsapp", "api"].includes(channel) ? channel : "widget", ...(sid && { sid }), ...(reach && { reach }), stage: "new" },
   });
   ctx.order = { id: doc._id, title, name: doc.name, contact: doc.contact, fields: doc.order.fields };
   return { ok: true, orderNumber: doc._id.slice(0, 8).toUpperCase(), note: `Sifariş qəbul olundu (nömrə: ${doc._id.slice(0, 8).toUpperCase()}). Müştəriyə bunu qısa de.${f.successMessage ? ` Mənası bu olsun: ${f.successMessage}` : " Şirkət tezliklə onunla əlaqə saxlayacaq."}` };

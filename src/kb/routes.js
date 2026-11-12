@@ -88,7 +88,10 @@ export function registerKbRoutes(app, { serviceAuth, customerTenant }) {
   // ---- cavabsız suallar ----
   const inboxView = (d) => ({ id: d._id, at: d.at, ...(d.message !== undefined && { message: d.message }), ...(d.reason && { reason: d.reason }),
     ...(d.contact !== undefined && { name: d.name ?? "", contact: d.contact, question: d.question ?? "", conversation: d.conversation ?? [], handled: leadStatus(d) === "solved",
-      status: leadStatus(d), priority: d.priority ?? "normal", assignee: d.assignee ?? null, notes: d.notes ?? [], history: d.history ?? [], ...(d.updatedAt && { updatedAt: d.updatedAt }), ...(d.order && { order: d.order }) }) });
+      status: leadStatus(d), priority: d.priority ?? "normal", assignee: d.assignee ?? null, notes: d.notes ?? [], history: d.history ?? [], ...(d.updatedAt && { updatedAt: d.updatedAt }),
+      ...(d.order && { order: { ...d.order, stage: ORDER_STAGES.includes(d.order.stage) ? d.order.stage : "new" } }), ...(d.booking && { booking: d.booking }) }) });
+  // Sifarişin mərhələsi (lövhə): yeni → təsdiqləndi → göndərildi → çatdırıldı / ləğv. Son ikisi müraciəti "həll olunub" edir.
+  const ORDER_STAGES = ["new", "confirmed", "shipped", "delivered", "cancelled"];
   // Müraciətin vəziyyəti: yeni → işdədir → gözləmədə (müştəridən cavab) → həll olunub. Köhnə qeydlərdə yalnız handled var.
   const LEAD_STATUS = ["new", "open", "pending", "solved"];
   const LEAD_PRIORITY = ["low", "normal", "high"];
@@ -101,9 +104,30 @@ export function registerKbRoutes(app, { serviceAuth, customerTenant }) {
     res.status((await deleteInbox("unanswered", req.tenant.tenantId, req.params.id)) ? 200 : 404).json({ ok: true });
   }));
 
+  // ---- operator cavablarından öyrənilən sual-cavab təklifləri (sahib təsdiqləyir) ----
+  const sugView = (d) => ({ id: d._id, at: d.at, question: d.question, answer: d.answer, ...(d.chatId && { chatId: d.chatId }) });
+  app.get(`${base}/suggestions`, ...guard, wrap(async (req, res) => {
+    const { total, items } = await listInbox("suggestions", req.tenant.tenantId, { limit: 100 });
+    res.json({ total, items: items.map(sugView) });
+  }));
+  app.delete(`${base}/suggestions/:id`, ...guard, wrap(async (req, res) => {
+    res.status((await deleteInbox("suggestions", req.tenant.tenantId, req.params.id)) ? 200 : 404).json({ ok: true });
+  }));
+  // Təsdiq: (sahibin düzəltdiyi) sual-cavab bilik bazasına yazılır, təklif silinir
+  app.post(`${base}/suggestions/:id/accept`, ...guard, wrap(async (req, res) => {
+    const cur = await getInbox("suggestions", req.tenant.tenantId, req.params.id);
+    if (!cur) return res.status(404).json({ error: "Təklif tapılmadı" });
+    const b = req.body ?? {};
+    const source = await createQa(req.tenant, { questions: Array.isArray(b.questions) && b.questions.length ? b.questions : [cur.question], answer: typeof b.answer === "string" && b.answer.trim() ? b.answer : cur.answer });
+    await deleteInbox("suggestions", req.tenant.tenantId, req.params.id);
+    res.status(201).json({ source: view(source) });
+  }));
+
   // ---- müraciətlər (operatorla əlaqə) ----
   app.get(`${base}/leads`, ...guard, wrap(async (req, res) => {
-    const { total, items } = await listInbox("leads", req.tenant.tenantId, { limit: Number(req.query.limit) || 100 });
+    // kind=order: yalnız sifarişlər (lövhə), kind=booking: yalnız randevular
+    const kind = req.query.kind === "order" ? "order" : req.query.kind === "booking" ? "booking" : null;
+    const { total, items } = await listInbox("leads", req.tenant.tenantId, { limit: Number(req.query.limit) || 100, ...(kind && { filter: (d) => Boolean(d[kind]) }) });
     res.json({ total, open: items.filter((d) => leadStatus(d) !== "solved").length, items: items.map(inboxView) });
   }));
   const cleanConvo = (c) => (Array.isArray(c) ? c : []).slice(-10)
@@ -131,9 +155,23 @@ export function registerKbRoutes(app, { serviceAuth, customerTenant }) {
       events.push(`assignee:${patch.assignee?.name ?? "-"}`);
     }
     const note = str(b.note, 1000);
-    if (!Object.keys(patch).length && !note) throw new KbError("Dəyişiklik yoxdur", "BAD_REQUEST");
     const cur = await getInbox("leads", req.tenant.tenantId, req.params.id);
     if (!cur) return res.status(404).json({ error: "Müraciət tapılmadı" });
+    if (b.orderStage !== undefined) {
+      if (!cur.order) throw new KbError("Bu müraciət sifariş deyil", "BAD_REQUEST");
+      if (!ORDER_STAGES.includes(b.orderStage)) throw new KbError("mərhələ düzgün deyil", "BAD_REQUEST");
+      patch.order = { ...cur.order, stage: b.orderStage };
+      events.push(`stage:${b.orderStage}`);
+      if (b.status === undefined) { patch.status = b.orderStage === "delivered" || b.orderStage === "cancelled" ? "solved" : b.orderStage === "new" ? "new" : "open"; patch.handled = patch.status === "solved"; }
+    }
+    if (b.bookingStatus !== undefined) {
+      if (!cur.booking) throw new KbError("Bu müraciət randevu deyil", "BAD_REQUEST");
+      if (!["booked", "done", "noshow", "cancelled"].includes(b.bookingStatus)) throw new KbError("randevu statusu düzgün deyil", "BAD_REQUEST");
+      patch.booking = { ...cur.booking, status: b.bookingStatus };
+      events.push(`booking:${b.bookingStatus}`);
+      if (b.status === undefined) { patch.status = b.bookingStatus === "booked" ? "open" : "solved"; patch.handled = patch.status === "solved"; }
+    }
+    if (!Object.keys(patch).length && !note) throw new KbError("Dəyişiklik yoxdur", "BAD_REQUEST");
     const at = new Date().toISOString();
     if (note) patch.notes = [...(cur.notes ?? []), { by, at, text: note }].slice(-30);
     if (events.length) patch.history = [...(cur.history ?? []), ...events.map((e) => ({ by, at, e }))].slice(-50);

@@ -33,10 +33,13 @@ import { actionStats, clearActionLog, listActionLog } from "./actions/log.js";
 import { answerFromKb } from "./kb/answer.js";
 import { draftReply, validDraftInput } from "./kb/draft.js";
 import { summarizeChat, validSummaryInput } from "./kb/summary.js";
+import { learnFromChat, validLearnInput } from "./kb/learn.js";
+import { addInbox, listInbox } from "./kb/store.js";
 import { registerKbRoutes } from "./kb/routes.js";
 import { deleteTenantKb } from "./kb/store.js";
 import { ANSWER_LENGTHS, cleanCompany, validateCompany } from "./ai/style.js";
 import { cleanOrderForm, validateOrderForm } from "./orders/orders.js";
+import { cleanBooking, validateBooking } from "./booking/booking.js";
 
 const LANGS = ["az", "en", "ru", "tr"];
 const MODES = ["listings", "support", "both"];
@@ -173,7 +176,7 @@ function probeProblem(r, source) {
   return { code: "NO_LISTINGS", error: "Elan API-sindən heç bir elan gəlmədi. Xəritələməni yoxlaya bilmək üçün saytda ən azı bir elan olmalıdır." };
 }
 
-export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = describeImage, transcribeFn = transcribeAudio, insightsFn = analyzeTopics, draftFn = draftReply, summaryFn = summarizeChat } = {}) {
+export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = describeImage, transcribeFn = transcribeAudio, insightsFn = analyzeTopics, draftFn = draftReply, summaryFn = summarizeChat, learnFn = learnFromChat } = {}) {
   const app = express();
   app.disable("x-powered-by");
   const smallJson = express.json({ limit: "100kb" });
@@ -464,6 +467,10 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
       // Operatora ötürmə qaydaları (sahibin ayarı): yalnız portal göndərir, açıq API-də köhnə davranış (istəyəndə və kömək edə bilməyəndə)
       const handoffRules = req.viaPortal ? cleanHandoffRules(req.body?.handoff) : null;
       const liveOn = Boolean(req.viaPortal && req.body?.live === true);
+      // Müştəriyə sonradan yazmaq üçün kanal ünvanı (Telegram/WhatsApp söhbəti): sifariş/randevu ilə saxlanır, portal status mesajı göndərir
+      const rr = req.viaPortal ? req.body?.reach : null;
+      const reach = rr && typeof rr === "object" && ["telegram", "whatsapp"].includes(rr.type) && typeof rr.chatId === "string" && /^[\w.@:+-]{1,80}$/.test(rr.chatId)
+        ? { type: rr.type, chatId: rr.chatId, ...(typeof rr.ref === "string" && /^[\w.@:+-]{1,120}$/.test(rr.ref) && { ref: rr.ref }), ...(typeof rr.lang === "string" && /^(az|en|ru|tr)$/.test(rr.lang) && { lang: rr.lang }) } : null;
       // Şəkil əvvəl mətnə çevrilir; sonrakı axın dəyişməz qalır
       let vision = null;
       if (image) {
@@ -484,8 +491,8 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
       const r0 = qaHit
         ? { answer: qaHit.answer, listings: [], sources: [], tokens: 0, costUsd: 0, qa: true, searched: false }
         : support
-        ? await kbFn({ tenant: req.tenant, message: question, history: hist, identity, channel, orderSid: cleanSid, lookup, handoffRules, live: liveOn, ...actionCtx })
-        : await adviseFn({ tenant: req.tenant, repo: await getRepo(req.tenant), message: question, history: hist, identity, channel, orderSid: cleanSid, lookup, handoffRules, ...actionCtx, live: liveOn });
+        ? await kbFn({ tenant: req.tenant, message: question, history: hist, identity, channel, orderSid: cleanSid, lookup, handoffRules, live: liveOn, reach, ...actionCtx })
+        : await adviseFn({ tenant: req.tenant, repo: await getRepo(req.tenant), message: question, history: hist, identity, channel, orderSid: cleanSid, lookup, handoffRules, ...actionCtx, live: liveOn, reach });
       const r = vision ? { ...r0, tokens: (r0.tokens ?? 0) + vision.tokens, costUsd: (r0.costUsd ?? 0) + (vision.costUsd ?? 0) } : r0;
       mark("model");
       await addTokens(req.tenant, r.tokens);
@@ -499,7 +506,7 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
       const results = support ? (r.unanswered ? 0 : 1) : !searched ? (r.unanswered ? -2 : -1) : (r.listings?.length ?? 0);
       if (!req.skipQueryLog) await recordQuery(req.tenant, { message: `${image ? "(şəkil) " : ""}${message.trim()}`, results, tokens: r.tokens, cached: r.cached, costAzn: bill?.billedAzn, sid, answer: r.answer, private: r.private, listings: r.listings, confirm: r.confirm });
       mark("log"); slowLog("ok");
-      res.json({ answer: r.answer, listings: r.listings ?? [], ...(vision && { imageNote: vision.description.slice(0, 200) }), ...(r.sources && { sources: r.sources }), ...(r.unanswered && { unanswered: true }), ...(r.handoff && { handoff: true, handoffReason: r.handoffReason ?? "asked", ...(r.handoffNote && { handoffNote: r.handoffNote }) }), ...(r.confirm && { confirm: r.confirm }), ...(r.order && { order: r.order }), ...(identityToken && !identity && { identity: "invalid" }), usage: { tokens: r.tokens },
+      res.json({ answer: r.answer, listings: r.listings ?? [], ...(vision && { imageNote: vision.description.slice(0, 200) }), ...(r.sources && { sources: r.sources }), ...(r.unanswered && { unanswered: true }), ...(r.handoff && { handoff: true, handoffReason: r.handoffReason ?? "asked", ...(r.handoffNote && { handoffNote: r.handoffNote }) }), ...(r.confirm && { confirm: r.confirm }), ...(r.order && { order: r.order }), ...(r.booking && { booking: r.booking }), ...(identityToken && !identity && { identity: "invalid" }), usage: { tokens: r.tokens },
         // Balans vəziyyəti yalnız portala verilir (müştərinin açıq API-sində görünmür)
         ...(req.viaPortal && bill && { billing: { state: bill.state, balanceAzn: bill.balanceAzn, billedAzn: bill.billedAzn, ...(bill.notify && { notify: bill.notify }), ...(bill.plan && { plan: bill.plan }), ...(bill.trial && { trial: bill.trial }) } }) });
     } catch (err) {
@@ -592,6 +599,22 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
     if (typeof kind !== "string" || !/^[a-z][a-z0-9_]{1,30}$/.test(kind) || typeof userId !== "string" || !/^[\w.@:+-]{1,100}$/.test(userId)) return res.status(400).json({ error: "kind və userId düzgün deyil" });
     try { res.json({ ok: true, kind, records: await fetchPrivate(req.tenant, kind, userId) }); }
     catch (e) { res.status(422).json({ ok: false, error: e.message, code: e.code ?? "TEST_FAILED" }); }
+  });
+
+  // ---------- API-siz randevu təqvimi ----------
+  app.get("/v1/service/tenants/:tenantId/booking", serviceAuth, customerTenant, (req, res) => res.json({ booking: req.tenant.booking ?? null }));
+  app.put("/v1/service/tenants/:tenantId/booking", serviceAuth, customerTenant, async (req, res) => {
+    const error = validateBooking(req.body ?? {});
+    if (error) return res.status(400).json({ error });
+    const booking = cleanBooking(req.body);
+    await updateCustomerTenant(req.tenant.tenantId, (t) => ({ ...t, booking }));
+    refreshTenants();
+    res.json({ booking });
+  });
+  app.delete("/v1/service/tenants/:tenantId/booking", serviceAuth, customerTenant, async (req, res) => {
+    await updateCustomerTenant(req.tenant.tenantId, (t) => { const { booking: _b, ...rest } = t; return rest; });
+    refreshTenants();
+    res.json({ ok: true });
   });
 
   // ---------- API-siz sifariş forması ----------
@@ -745,6 +768,25 @@ export function createApp({ adviseFn = advise, kbFn = answerFromKb, visionFn = d
     } catch (e) {
       console.error(`[summary] ${req.tenant?.tenantId}:`, e.message);
       res.status(502).json({ error: "Xülasə alınmadı, bir az sonra yenidən cəhd edin", code: "SUMMARY_FAILED" });
+    }
+  });
+  // Operator cavablarından öyrənmə (söhbət bağlananda portal çağırır): təkliflər sahibin təsdiqinə düşür. Balans yoxdursa susur.
+  app.post("/v1/service/tenants/:tenantId/kb/learn", serviceAuth, customerTenant, async (req, res) => {
+    if (!validLearnInput(req.body)) return res.status(400).json({ error: "messages düzgün deyil (operator cavabı lazımdır)" });
+    const funds = await canSpend(req.tenant, { reply: false });
+    if (!funds.ok) return res.status(402).json({ error: funds.message, code: funds.code });
+    const { total } = await listInbox("suggestions", req.tenant.tenantId, { limit: 1 });
+    if (total >= 100) return res.json({ added: 0, full: true }); // baxılmamış təkliflər çoxdur: yenisi yığılmır
+    try {
+      const r = await learnFn({ tenant: req.tenant, messages: req.body.messages.map((m) => ({ from: m.from, text: m.text.slice(0, 600) })) });
+      await addTokens(req.tenant, r.tokens);
+      try { await charge(req.tenant, { costUsd: r.costUsd ?? 0, tokens: r.tokens ?? 0 }); } catch (e) { console.error(`[billing] ${req.tenant.tenantId}:`, e.message); }
+      const chatId = typeof req.body.chatId === "string" && /^[\w-]{1,64}$/.test(req.body.chatId) ? req.body.chatId : null;
+      for (const p of r.pairs) await addInbox("suggestions", req.tenant.tenantId, { question: p.question, answer: p.answer, ...(chatId && { chatId }) });
+      res.json({ added: r.pairs.length, usage: { tokens: r.tokens } });
+    } catch (e) {
+      console.error(`[learn] ${req.tenant?.tenantId}:`, e.message);
+      res.status(502).json({ error: "Təklif hazırlanmadı", code: "LEARN_FAILED" });
     }
   });
   app.delete("/v1/service/tenants/:tenantId/queries", serviceAuth, customerTenant, async (req, res) => { await clearQueries(req.tenant.tenantId); res.json({ ok: true }); });

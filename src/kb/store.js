@@ -10,7 +10,7 @@ const FILE = () => process.env.KB_FILE || new URL("../../data/kb.json", import.m
 let state;
 const load = () => {
   if (!state) { try { state = JSON.parse(fs.readFileSync(FILE(), "utf8")); } catch { state = {}; } }
-  for (const k of ["sources", "chunks", "unanswered", "leads"]) state[k] ??= [];
+  for (const k of ["sources", "chunks", "unanswered", "leads", "suggestions"]) state[k] ??= [];
   return state;
 };
 const save = () => {
@@ -21,7 +21,7 @@ const save = () => {
 export const resetKbMemory = () => { state = undefined; chunkCache.clear(); };
 
 const col = async (n) => (await storeDb()).collection(n);
-const COLS = { sources: "kb_sources", chunks: "kb_chunks", unanswered: "kb_unanswered", leads: "kb_leads" };
+const COLS = { sources: "kb_sources", chunks: "kb_chunks", unanswered: "kb_unanswered", leads: "kb_leads", suggestions: "kb_suggestions" };
 const byTenant = async (kind, tenantId) => {
   if (mongoEnabled()) return (await (await col(COLS[kind])).find({ tenantId }).toArray());
   return load()[kind].filter((d) => d.tenantId === tenantId);
@@ -97,8 +97,8 @@ export async function addInbox(kind, tenantId, doc) {
   if (mine.length > INBOX_CAP) { const drop = new Set(mine.slice(0, mine.length - INBOX_CAP).map((x) => x._id)); s[kind] = s[kind].filter((x) => !drop.has(x._id)); }
   save(); return d;
 }
-export async function listInbox(kind, tenantId, { limit = 100 } = {}) {
-  const rows = (await byTenant(kind, tenantId)).sort((a, b) => new Date(b.at) - new Date(a.at));
+export async function listInbox(kind, tenantId, { limit = 100, filter = null } = {}) {
+  const rows = (await byTenant(kind, tenantId)).filter((d) => !filter || filter(d)).sort((a, b) => new Date(b.at) - new Date(a.at));
   return { total: rows.length, items: rows.slice(0, Math.min(Math.max(limit, 1), 500)) };
 }
 export async function getInbox(kind, tenantId, id) { return (await byTenant(kind, tenantId)).find((d) => d._id === id) ?? null; }
