@@ -92,7 +92,7 @@ export async function finance({ months = 6 } = {}) {
     const acc = accById.get(tenantId);
     const revenue = t.billed - t.free + (t.subs ?? 0);
     return {
-      tenantId, requests: t.requests, plan: acc?.sub?.plan ?? null,
+      tenantId, requests: t.requests, plan: acc?.sub?.plan ?? null, trial: !acc?.sub?.plan && Boolean(acc?.trial),
       billedAzn: azn(t.billed), freeAzn: azn(t.free), subsAzn: azn(t.subs ?? 0), revenueAzn: azn(revenue), costAzn: azn(t.cost), profitAzn: azn(revenue - t.cost),
       markup: acc?.markup ?? config.markup(), customMarkup: acc?.markup != null,
       balanceAzn: acc ? azn(acc.free + acc.paid) : 0,
