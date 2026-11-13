@@ -117,7 +117,8 @@ export async function canSpend(tenant, { reply = true } = {}) {
   const limit = dailyLimitOf(acc);
   if (limit > 0) {
     const day = await store().getDay(tenant.tenantId, today());
-    if ((day?.billed ?? 0) >= limit) return { ok: false, code: "DAILY_LIMIT", message: "Gündəlik xərc limitinə çatılıb" };
+    // Plan müştərisində balansdan pul çıxılmır (billed = 0): limit real AI xərcinə görə işləyir. Balansla işləyəndə billed ≥ cost.
+    if (Math.max(day?.billed ?? 0, day?.cost ?? 0) >= limit) return { ok: false, code: "DAILY_LIMIT", message: "Gündəlik xərc limitinə çatılıb" };
   }
   if (!config.enforce()) return { ok: true };
   // Abunə: plan limiti və ya əlavə paket. Köməkçi xərclər (səs, operator qaralaması, analiz) planın içindədir.
@@ -562,6 +563,8 @@ export async function summary(tenantId, { admin = false, history = true } = {}) 
     out.admin = {
       markup: acc.markup ?? null, defaultMarkup: config.markup(), creditLimitAzn: fromMicro(acc.creditLimit ?? 0), costAzn30: fromMicro(last30.cost), lifetimeSpentAzn: fromMicro(acc.spent ?? 0),
       dailyLimitAzn: acc.dailyLimit != null ? fromMicro(acc.dailyLimit) : null, defaultDailyLimitAzn: config.dailyLimitAzn(), todayAzn: fromMicro(todayRow?.billed ?? 0),
+      // Real (vuruqsuz) xərc: provayderə ödənən
+      todayCostAzn: fromMicro(todayRow?.cost ?? 0), monthCostAzn: fromMicro(thisMonth.cost ?? 0),
     };
   }
   return out;

@@ -2,7 +2,7 @@
 import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { tmpFile } from "../testkit/helpers.mjs";
-import { adminSetPlan, grantReplies, canSpend, charge, entitlements, planReminders, quoteOrder, requestOrder, resolveRequest, setNextPlan, summary } from "../src/billing/billing.js";
+import { adminSetPlan, grantReplies, canSpend, charge, setSettings, entitlements, planReminders, quoteOrder, requestOrder, resolveRequest, setNextPlan, summary } from "../src/billing/billing.js";
 import { DEFAULT_CATALOG, _resetCatalogCache, applyOrder, getCatalog, quote, rollWindow, setCatalog } from "../src/billing/plans.js";
 import { resetStores, store } from "../src/billing/storage.js";
 import { finance } from "../src/billing/finance.js";
@@ -198,4 +198,19 @@ test("bonus cavablar: planda paket kimi, plansız sınağa; ref ilə bir dəfə"
 test("kataloq yoxlanır", async () => {
   await assert.rejects(setCatalog({ plans: [] }));
   await assert.rejects(setCatalog({ ...DEFAULT_CATALOG, plans: [{ ...DEFAULT_CATALOG.plans[0], id: "Bad Id!" }] }));
+});
+
+test("gündəlik limit plan müştərisində real AI xərcinə görə işləyir (balansdan pul çıxılmasa da); admin real xərci görür", async () => {
+  const id = fresh();
+  await buy(id, { kind: "plan", plan: "start", cycle: "month" });
+  await setSettings(id, { dailyLimitAzn: 0.01 });
+  assert.equal((await canSpend({ tenantId: id })).ok, true);
+  const r = await charge({ tenantId: id }, { costUsd: 0.01, tokens: 100, reply: true });
+  assert.equal(r.billedAzn, 0);
+  const c = await canSpend({ tenantId: id });
+  assert.equal(c.code, "DAILY_LIMIT");
+  const s = await summary(id, { admin: true });
+  assert.ok(s.admin.todayCostAzn >= 0.01, "bu günün real xərci");
+  assert.equal(s.admin.todayAzn, 0, "balansdan çıxılan yoxdur");
+  assert.ok(s.admin.monthCostAzn >= s.admin.todayCostAzn);
 });
