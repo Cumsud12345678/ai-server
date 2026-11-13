@@ -6,6 +6,7 @@ import { listCustomerTenants } from "./customerStore.js";
 export const hashKey = (key) => crypto.createHash("sha256").update(String(key)).digest("hex");
 
 let byHash, byId;
+const warnedDev = new Set();
 function load() {
   if (byHash) return;
   const file = process.env.TENANTS_FILE || new URL("./tenants.json", import.meta.url);
@@ -17,7 +18,8 @@ function load() {
       continue;
     }
     if (t.devOnly && process.env.NODE_ENV === "production") {
-      console.warn(`[tenants] "${t.tenantId}" yalnız inkişaf üçündür, production-da yüklənmir`);
+      // Siyahı hər müştəri dəyişikliyində yenidən yüklənir: xəbərdarlıq jurnalı doldurmasın deyə bir dəfə yazılır
+      if (!warnedDev.has(t.tenantId)) { warnedDev.add(t.tenantId); console.warn(`[tenants] "${t.tenantId}" yalnız inkişaf üçündür, production-da yüklənmir`); }
       continue;
     }
     byHash.set(t.apiKeyHash, t);
