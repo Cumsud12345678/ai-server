@@ -236,7 +236,11 @@ async function chargeTrial(tenantId, acc, { reply, rawCost, requests, tokens }) 
       const left = acc.trial.left - 1;
       const notified = left <= 0 ? true : Boolean(acc.trial.notified);
       if (left <= 0 && !acc.trial.notified) notify = "trialEnd";
-      patch = { trial: { ...acc.trial, left, notified } };
+      // Sınaq cavablarının 80%-i işləndi: sahibə bir dəfə xəbərdarlıq (bot qəfil dayanmasın)
+      const lowAt = Math.max(1, Math.round((acc.trial.total ?? 0) * 0.2));
+      const low = left > 0 && left <= lowAt && !acc.trial.lowNotified;
+      if (low) notify = "trialLow";
+      patch = { trial: { ...acc.trial, left, notified, ...(low && { lowNotified: true }) } };
     }
     if (!reply || (await st.casAcc(tenantId, acc.v, patch))) {
       await st.incDay(tenantId, today(), { billed: 0, cost: rawCost, requests, tokens, ...(reply && { trialReplies: 1 }) });
@@ -361,6 +365,15 @@ export async function planReminders(now = Date.now()) {
   const out = [];
   for (const a of await st.listAccounts()) {
     const sub = a.sub;
+    // Pulsuz sınaq müddətlə bitir (cavablar qalsa da): 3 gün qalmış və bitəndə bir dəfə xəbər (əks halda bot səssizcə dayanırdı)
+    if (!sub?.plan && a.trial?.until && (a.trial.left ?? 0) > 0) {
+      const until = Date.parse(a.trial.until);
+      const tn = a.trial.dateNotified ?? {};
+      const tk = now >= until ? (tn.ended ? null : "trialEnded") : until - now <= 3 * 86_400_000 && !tn.expiring ? "trialExpiring" : null;
+      if (tk && (await st.casAcc(a._id, a.v, { trial: { ...a.trial, dateNotified: { ...tn, expiring: true, ...(tk === "trialEnded" && { ended: true }) } } })))
+        out.push({ tenantId: a._id, kind: tk, end: a.trial.until, left: a.trial.left });
+      continue;
+    }
     if (!sub?.plan) continue;
     const end = Date.parse(sub.end);
     let kind = null;

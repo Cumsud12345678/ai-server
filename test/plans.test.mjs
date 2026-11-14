@@ -148,7 +148,7 @@ test("pulsuz sınaq: 100 cavab 14 gün ərzində, bitəndə bir dəfə xəbər v
   await charge(T(id), { costUsd: 0.001, reply: false }); // köməkçi xərc sınaqdan çıxılmır
   const notes = [];
   for (let i = 0; i < 3; i++) { const r = await charge(T(id), { costUsd: 0.001, reply: true }); assert.equal(r.billedAzn, 0); if (r.notify) notes.push(r.notify); }
-  assert.deepEqual(notes, ["trialEnd"]);
+  assert.deepEqual(notes, ["trialLow", "trialEnd"], "80%-də bir dəfə xəbərdarlıq, bitəndə bir dəfə");
   const c = await canSpend(T(id));
   assert.equal(c.ok, false);
   assert.equal(c.code, "TRIAL_ENDED");
@@ -213,4 +213,16 @@ test("gündəlik limit plan müştərisində real AI xərcinə görə işləyir 
   assert.ok(s.admin.todayCostAzn >= 0.01, "bu günün real xərci");
   assert.equal(s.admin.todayAzn, 0, "balansdan çıxılan yoxdur");
   assert.ok(s.admin.monthCostAzn >= s.admin.todayCostAzn);
+});
+
+test("pulsuz sınaq müddətlə bitəndə: 3 gün qalmış və bitəndə bir dəfə xatırlatma", async () => {
+  process.env.BILLING_TRIAL_REPLIES = "5"; process.env.BILLING_TRIAL_DAYS = "2";
+  const id = fresh();
+  try { assert.equal((await canSpend({ tenantId: id })).ok, true); }
+  finally { process.env.BILLING_TRIAL_REPLIES = "0"; delete process.env.BILLING_TRIAL_DAYS; }
+  const mine = async (t) => (await planReminders(t)).filter((r) => r.tenantId === id).map((r) => r.kind);
+  assert.deepEqual(await mine(Date.now()), ["trialExpiring"]);
+  assert.deepEqual(await mine(Date.now()), []);
+  assert.deepEqual(await mine(Date.now() + 3 * 86_400_000), ["trialEnded"]);
+  assert.deepEqual(await mine(Date.now() + 4 * 86_400_000), []);
 });
