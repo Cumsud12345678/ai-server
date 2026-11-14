@@ -133,7 +133,8 @@ export async function runOrderTool(tenant, args, ctx, { sid = null, channel = nu
   if (!f) return { error: "Sifariş qəbulu hazırda söndürülüb. Müştəriyə operatorla əlaqə saxlamağı təklif et." };
   if (ctx.order) return { error: "Bu sifariş artıq qəbul olunub, təkrar göndərmə." };
   const perDay = Number(process.env.ORDERS_PER_DAY) || 200;
-  if (!allow(`o|${tenant.tenantId}|${sid ?? "nosid"}`, 3, 60 * 60_000) || !allow(`od|${tenant.tenantId}`, perDay, 24 * 60 * 60_000))
+  // Söhbət identifikatoru yoxdursa (API ilə sessionId göndərilməyib) bütün istifadəçilər bir sayğacı bölüşməsin: yalnız sayt limiti
+  if ((sid && !allow(`o|${tenant.tenantId}|${sid}`, 3, 60 * 60_000)) || !allow(`od|${tenant.tenantId}`, perDay, 24 * 60 * 60_000))
     return { error: "Qısa müddətdə çox sifariş göndərildi. Müştəriyə bir az sonra yenidən cəhd etməyi və ya operatorla əlaqə saxlamağı de." };
   const { values, missing, bad } = coerceOrder(f, args);
   if (missing.length) return { error: `Bu məlumatlar çatışmır: ${missing.join(", ")}. Müştəridən soruş, uydurma.` };

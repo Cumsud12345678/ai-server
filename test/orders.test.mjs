@@ -125,6 +125,14 @@ test("açıq API ilə gələn sifariş 'api' kanalı kimi qeyd olunur", async ()
   assert.equal(lead.order.channel, "api");
 });
 
+test("sessionId göndərilməyən API sorğuları bir 'ziyarətçi' sayılmır: 3-dən çox sifariş qəbul olunur", async () => {
+  for (let i = 0; i < 4; i++) {
+    nextCall = { name: "submit_order", args: good };
+    const r = await (await call("POST", "/v1/chat", { message: "təsdiq", history: [{ role: "user", text: "x" }] }, { "content-type": "application/json", authorization: `Bearer ${apiKey}` })).json();
+    assert.ok(r.order, `${i + 1}-ci sifariş qəbul olunur`);
+  }
+});
+
 test("forma söndürüləndə və ya silinəndə alət verilmir", async () => {
   await call("PUT", T("/order-form"), form({ enabled: false }));
   lastTools = []; // model çağırılmasa da (qısa yol) əvvəlki testin alətləri qalmasın

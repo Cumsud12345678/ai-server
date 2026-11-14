@@ -93,7 +93,8 @@ export async function lookupOrder(tenant, { orderId: rawId, phone }, { sid = nul
   const t = tenant.tenantId;
   const failKey = `f|${t}|${orderId.toLowerCase()}`;
   if (blocked(failKey, 5, 60 * 60_000)) return { error: "Bu sifariş nömrəsi ilə çox uğursuz cəhd olub. Müştəriyə bir saat sonra yenidən yoxlamağı və ya operatorla əlaqə saxlamağı de." };
-  if (!allow(`s|${t}|${sid ?? "nosid"}`, 5, 10 * 60_000) || !allow(`d|${t}`, Number(process.env.LOOKUPS_PER_DAY) || 1000, 24 * 60 * 60_000))
+  // sessionId yoxdursa söhbət limiti tətbiq olunmur (sifariş nömrəsi üzrə uğursuz cəhd və gündəlik limit qalır)
+  if ((sid && !allow(`s|${t}|${sid}`, 5, 10 * 60_000)) || !allow(`d|${t}`, Number(process.env.LOOKUPS_PER_DAY) || 1000, 24 * 60 * 60_000))
     return { error: "Qısa müddətdə çox axtarış edildi. Bir neçə dəqiqə sonra yenidən cəhd etməyi təklif et." };
   let order;
   try { order = await fetchOrder(tenant, orderId); }

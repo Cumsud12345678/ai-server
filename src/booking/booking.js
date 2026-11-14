@@ -193,7 +193,8 @@ export async function runBookingTool(tenant, name, args, ctx, { sid = null, chan
   ctx.private = true; // şəxsi məlumatdır: keşə və sorğu jurnalına düşməsin
   if (ctx.booking) return { error: "Bu randevu artıq qeydə alınıb, təkrar göndərmə." };
   const perDay = Number(process.env.BOOKINGS_PER_DAY) || 300;
-  if (!allow(`b|${tenant.tenantId}|${sid ?? "nosid"}`, 3, 60 * 60_000) || !allow(`bd|${tenant.tenantId}`, perDay, 24 * 60 * 60_000))
+  // sessionId yoxdursa yalnız sayt limiti (hamı bir "ziyarətçi" sayılmasın)
+  if ((sid && !allow(`b|${tenant.tenantId}|${sid}`, 3, 60 * 60_000)) || !allow(`bd|${tenant.tenantId}`, perDay, 24 * 60 * 60_000))
     return { error: "Qısa müddətdə çox randevu göndərildi. Müştəriyə bir az sonra yenidən cəhd etməyi və ya operatorla əlaqə saxlamağı de." };
   const date = str(args?.date, 10), time = str(args?.time, 5);
   if (!DATE.test(date) || !HM.test(time)) return { error: "Gün və saat düzgün deyil. find_slots ilə boş vaxtı yoxla." };
